@@ -3,8 +3,22 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import bs58 from 'bs58';
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL, sendAndConfirmTransaction } from '@solana/web3.js';
+
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function decodeBase58(input) {
+  let value = 0n;
+  for (const char of input) {
+    const digit = BASE58_ALPHABET.indexOf(char);
+    if (digit < 0) throw new Error('Invalid base58 character in secret key.');
+    value = value * 58n + BigInt(digit);
+  }
+  const bytes = [];
+  while (value > 0n) { bytes.unshift(Number(value & 255n)); value >>= 8n; }
+  let leadingZeros = 0;
+  while (leadingZeros < input.length && input[leadingZeros] === '1') leadingZeros++;
+  return Uint8Array.from([...Array(leadingZeros).fill(0), ...bytes]);
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -49,7 +63,7 @@ function treasuryKeypair() {
   const value = process.env.TREASURY_SECRET_KEY;
   if (!value) throw new Error('TREASURY_SECRET_KEY is not configured.');
   let bytes;
-  try { bytes = value.trim().startsWith('[') ? Uint8Array.from(JSON.parse(value)) : bs58.decode(value.trim()); }
+  try { bytes = value.trim().startsWith('[') ? Uint8Array.from(JSON.parse(value)) : decodeBase58(value.trim()); }
   catch { throw new Error('TREASURY_SECRET_KEY must be a base58 Solana secret key or JSON byte array.'); }
   return Keypair.fromSecretKey(bytes);
 }
