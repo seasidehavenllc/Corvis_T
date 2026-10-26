@@ -1,13 +1,19 @@
 {
-  "name": "corvis-trading-starter",
-  "version": "0.1.0",
+  "name": "corvis-trading",
+  "version": "0.3.0",
   "private": true,
-  "description": "Standalone Corvis Trading dashboard and paper-trading backend starter",
+  "description": "Corvis Trading dashboard, encrypted Solana bot wallets, treasury balance and confirmed SOL withdrawals; automated live trading intentionally disabled",
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "check": "node --check server.js"
   },
-  "engines": { "node": ">=20" },
-  "dependencies": { "express": "^4.21.2" }
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.4",
+    "express": "^4.21.2"
+  }
 }
