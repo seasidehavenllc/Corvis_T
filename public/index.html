@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Corvis Trading</title>
+<style>
+:root{color-scheme:dark;--bg:#080b12;--panel:#101622;--line:#222d40;--muted:#94a3b8;--text:#edf3ff;--accent:#67e8c2;--warn:#f8cc7a}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 70% -10%,#1a3040 0,transparent 45%),var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+header{padding:22px clamp(16px,4vw,44px);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+.brand{font-weight:800;letter-spacing:.12em}.brand span{color:var(--accent)}.sub{color:var(--muted);font-size:13px}
+main{max-width:1200px;margin:auto;padding:24px clamp(14px,3vw,32px) 50px}
+.grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:14px}.panel{background:linear-gradient(145deg,#121a28,#0e1420);border:1px solid var(--line);border-radius:16px;padding:18px;min-width:0}.span3{grid-column:span 3}.span4{grid-column:span 4}.span5{grid-column:span 5}.span7{grid-column:span 7}.span8{grid-column:span 8}.span12{grid-column:span 12}
+@media(max-width:850px){.span3,.span4,.span5,.span7,.span8{grid-column:span 12}}
+h1{font-size:clamp(25px,4vw,38px);margin:0 0 6px}h2{font-size:16px;margin:0 0 14px}.metric{font-size:27px;font-weight:750}.muted{color:var(--muted)}.pill{display:inline-flex;border:1px solid #315348;color:var(--accent);border-radius:999px;padding:4px 9px;font-size:12px}.pill.warn{border-color:#6b5129;color:var(--warn)}
+button,input,select{font:inherit}button{background:var(--accent);color:#06110e;border:0;border-radius:10px;padding:10px 14px;font-weight:750;cursor:pointer}button.secondary{background:#1b2637;color:var(--text);border:1px solid var(--line)}button:disabled{opacity:.45;cursor:not-allowed}
+input,select{width:100%;background:#080e18;color:var(--text);border:1px solid #2a374a;border-radius:9px;padding:10px;margin-top:5px}label{font-size:13px;color:var(--muted);display:block;margin-bottom:12px}
+.row{display:flex;justify-content:space-between;align-items:center;gap:12px}.bot{border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:10px}.bot-title{font-weight:750}.address{overflow-wrap:anywhere;font:12px ui-monospace,monospace;color:#b5c2d6}.event{padding:10px 0;border-bottom:1px solid var(--line);font-size:13px}.event:last-child{border:0}.notice{border-left:3px solid var(--warn);padding:10px 12px;background:#201b13;color:#e7d3aa;border-radius:0 8px 8px 0;font-size:13px}
+</style></head>
+<body>
+<header><div><div class="brand">CORVIS <span>TRADING</span></div><div class="sub">Solana strategy dashboard · standalone project</div></div><div class="row"><span id="mode" class="pill warn">PAPER MODE</span><span id="server" class="muted">Connecting…</span></div></header>
+<main>
+  <div style="margin-bottom:22px"><h1>Trading control room</h1><div class="muted">Configure bots, risk limits, and venue adapters from one workspace.</div></div>
+  <div class="grid">
+    <section class="panel span3"><div class="muted">Backend</div><div class="metric" id="uptime">—</div><div class="sub">Process uptime (seconds)</div></section>
+    <section class="panel span3"><div class="muted">Bot profiles</div><div class="metric" id="botCount">—</div><div class="sub">Saved in this demo process</div></section>
+    <section class="panel span3"><div class="muted">Live execution</div><div class="metric">OFF</div><div class="sub">No transactions are sent</div></section>
+    <section class="panel span3"><div class="muted">Default take profit</div><div class="metric">1.45×</div><div class="sub">+45% before fees/slippage</div></section>
+    <section class="panel span7"><div class="row"><h2>Bot profiles</h2><button id="refresh" class="secondary">Refresh</button></div><div id="bots" class="muted">Loading…</div></section>
+    <section class="panel span5"><h2>Add a bot profile</h2><form id="botForm">
+      <label>Bot name<input name="name" placeholder="e.g. Pump monitor 2" required maxlength="40"></label>
+      <label>Venue<select name="venue"><option>pump.fun (monitor-only adapter)</option><option>Jupiter-routed DEX swaps</option><option>Raydium (adapter required)</option><option>Orca (adapter required)</option></select></label>
+      <label>Public wallet address (optional)<input name="walletAddress" placeholder="Solana public address only"></label>
+      <label>Take-profit multiplier<input name="takeProfitMultiplier" type="number" min="1.01" max="10" step=".01" value="1.45" required></label>
+      <label>Stop loss (%)<input name="stopLossPercent" type="number" min="1" max="100" step="1" value="15" required></label>
+      <label>Maximum position (SOL)<input name="maxPositionSol" type="number" min=".001" max="10" step=".001" value=".05" required></label>
+      <button type="submit">Create profile</button>
+    </form><p class="sub">Profiles only. This starter does not connect a wallet or trade live.</p></section>
+    <section class="panel span7"><h2>Activity log</h2><div id="events" class="muted">Loading…</div></section>
+    <section class="panel span5"><h2>Before live trading</h2><div class="notice">This starter is paper-mode only. It contains no private keys, transaction signer, token-launch feed, or live order execution.</div><ul class="muted" style="padding-left:19px"><li>Use a dedicated low-balance trading wallet for testing.</li><li>Keep signing credentials on the backend in a secrets manager—not in this webpage or GitHub.</li><li>Add persistent storage, authentication, RPC failover, transaction simulation, and kill switches.</li><li>Verify each venue’s terms and API capabilities before enabling its adapter.</li></ul></section>
+  </div>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+async function api(url,opts={}){const r=await fetch(url,{headers:{'Content-Type':'application/json'},...opts});const d=await r.json();if(!r.ok)throw new Error(d.error||'Request failed');return d}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function load(){try{const [st,bots,events]=await Promise.all([api('/api/status'),api('/api/bots'),api('/api/events')]);$('#server').textContent='Backend online';$('#mode').textContent=st.mode.toUpperCase()+' MODE';$('#uptime').textContent=st.uptimeSeconds;$('#botCount').textContent=bots.length;$('#bots').innerHTML=bots.map(b=>`<div class="bot"><div class="row"><div><div class="bot-title">${esc(b.name)}</div><div class="sub">${esc(b.venue)}</div></div><span class="pill warn">${b.enabled?'MONITORING':'PAUSED'}</span></div><div class="address" style="margin:8px 0">${esc(b.walletAddress||'No public address configured')}</div><div class="sub">TP ${Number(b.takeProfitMultiplier).toFixed(2)}× · Stop ${b.stopLossPercent}% · Max ${b.maxPositionSol} SOL</div><div style="margin-top:10px"><button class="secondary" data-toggle="${esc(b.id)}" data-enabled="${b.enabled}">${b.enabled?'Pause':'Start paper monitor'}</button></div></div>`).join('');$('#events').innerHTML=events.slice(0,12).map(e=>`<div class="event"><span class="muted">${new Date(e.at).toLocaleString()}</span><br>${esc(e.message)}</div>`).join('')||'No events';}catch(e){$('#server').textContent='Backend unavailable';$('#bots').textContent=e.message}}
+$('#refresh').onclick=load;
+$('#botForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);const data=Object.fromEntries(f);for(const k of ['takeProfitMultiplier','stopLossPercent','maxPositionSol'])data[k]=Number(data[k]);try{await api('/api/bots',{method:'POST',body:JSON.stringify(data)});e.target.reset();e.target.elements.takeProfitMultiplier.value='1.45';e.target.elements.stopLossPercent.value='15';e.target.elements.maxPositionSol.value='.05';await load()}catch(err){alert(err.message)}};
+$('#bots').addEventListener('click',async e=>{const b=e.target.closest('[data-toggle]');if(!b)return;try{await api('/api/bots/'+b.dataset.toggle,{method:'PATCH',body:JSON.stringify({enabled:b.dataset.enabled!=='true'})});await load()}catch(err){alert(err.message)}});
+load();setInterval(load,10000);
+</script></body></html>
