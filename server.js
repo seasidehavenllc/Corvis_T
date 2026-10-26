@@ -1,11 +1,12 @@
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = Number(process.env.PORT || 3000);
-const mode = process.env.APP_MODE || "paper";
+const mode = "paper"; // Live trading is deliberately locked until a real, tested signer/execution engine exists.
 
 app.use(express.json({ limit: "32kb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -65,7 +66,7 @@ app.post("/api/bots", (req, res) => {
     return res.status(400).json({ error: "Max position must be greater than 0 and at most 10 SOL." });
 
   const bot = {
-    id: `bot-${Date.now()}`,
+    id: randomUUID(),
     name,
     venue: String(body.venue || "Jupiter-routed DEX swaps").slice(0, 80),
     walletAddress,
@@ -89,6 +90,22 @@ app.patch("/api/bots/:id", (req, res) => {
     log("info", `${bot.name} ${bot.enabled ? "started in paper mode" : "paused"}.`);
   }
   res.json(bot);
+});
+
+app.delete("/api/bots/:id", (req, res) => {
+  const index = bots.findIndex(b => b.id === req.params.id);
+  if (index < 0) return res.status(404).json({ error: "Bot not found." });
+  if (req.body?.confirm !== true)
+    return res.status(400).json({ error: "Explicit confirmation required: send { confirm: true }." });
+  const bot = bots[index];
+  if (bot.enabled) return res.status(409).json({ error: "Pause this bot before deleting it." });
+  bots.splice(index, 1);
+  log("info", `${bot.name} profile deleted. No wallet funds were moved.`);
+  res.json({ ok: true, id: bot.id, message: "Profile deleted. No wallet funds were moved." });
+});
+
+app.get("/api/stats", (_req, res) => {
+  res.json({ botCount: bots.length, paperTrades: 0, liveTrades: 0, realizedPnlSol: 0, note: "Trade execution and P&L tracking are not implemented in this starter." });
 });
 
 app.get("/api/events", (_req, res) => res.json(events));
