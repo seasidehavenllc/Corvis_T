@@ -1,0 +1,100 @@
+import express from "express";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const app = express();
+const port = Number(process.env.PORT || 3000);
+const mode = process.env.APP_MODE || "paper";
+
+app.use(express.json({ limit: "32kb" }));
+app.use(express.static(path.join(__dirname, "public")));
+
+const bots = [
+  {
+    id: "bot-1",
+    name: "Bot 1",
+    venue: "pump.fun (monitor-only adapter)",
+    walletAddress: "",
+    enabled: false,
+    takeProfitMultiplier: 1.45,
+    stopLossPercent: 15,
+    maxPositionSol: 0.05,
+    status: "Paper mode · idle"
+  }
+];
+
+const events = [
+  { at: new Date().toISOString(), level: "info", message: "Corvis Trading backend started in paper mode." },
+  { at: new Date().toISOString(), level: "info", message: "No wallet signer or live execution is configured." }
+];
+
+function log(level, message) {
+  events.unshift({ at: new Date().toISOString(), level, message });
+  if (events.length > 100) events.length = 100;
+}
+
+app.get("/api/status", (_req, res) => {
+  res.json({
+    app: "Corvis Trading",
+    mode,
+    liveExecutionEnabled: false,
+    status: "online",
+    uptimeSeconds: Math.floor(process.uptime()),
+    botCount: bots.length,
+    note: "Starter build: paper mode only; no transactions are signed or sent."
+  });
+});
+
+app.get("/api/bots", (_req, res) => res.json(bots));
+
+app.post("/api/bots", (req, res) => {
+  const body = req.body || {};
+  const name = String(body.name || "").trim().slice(0, 40);
+  const walletAddress = String(body.walletAddress || "").trim().slice(0, 64);
+  const takeProfitMultiplier = Number(body.takeProfitMultiplier ?? 1.45);
+  const stopLossPercent = Number(body.stopLossPercent ?? 15);
+  const maxPositionSol = Number(body.maxPositionSol ?? 0.05);
+
+  if (!name) return res.status(400).json({ error: "Bot name is required." });
+  if (!(takeProfitMultiplier > 1 && takeProfitMultiplier <= 10))
+    return res.status(400).json({ error: "Take profit multiplier must be greater than 1 and at most 10." });
+  if (!(stopLossPercent > 0 && stopLossPercent <= 100))
+    return res.status(400).json({ error: "Stop loss must be between 0 and 100%." });
+  if (!(maxPositionSol > 0 && maxPositionSol <= 10))
+    return res.status(400).json({ error: "Max position must be greater than 0 and at most 10 SOL." });
+
+  const bot = {
+    id: `bot-${Date.now()}`,
+    name,
+    venue: String(body.venue || "Jupiter-routed DEX swaps").slice(0, 80),
+    walletAddress,
+    enabled: false,
+    takeProfitMultiplier,
+    stopLossPercent,
+    maxPositionSol,
+    status: "Paper mode · idle"
+  };
+  bots.push(bot);
+  log("info", `${name} profile created. Trading remains disabled.`);
+  res.status(201).json(bot);
+});
+
+app.patch("/api/bots/:id", (req, res) => {
+  const bot = bots.find(b => b.id === req.params.id);
+  if (!bot) return res.status(404).json({ error: "Bot not found." });
+  if (typeof req.body?.enabled === "boolean") {
+    bot.enabled = req.body.enabled;
+    bot.status = bot.enabled ? "Paper mode · monitoring simulation" : "Paper mode · paused";
+    log("info", `${bot.name} ${bot.enabled ? "started in paper mode" : "paused"}.`);
+  }
+  res.json(bot);
+});
+
+app.get("/api/events", (_req, res) => res.json(events));
+
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+app.listen(port, "0.0.0.0", () => {
+  console.log(`Corvis Trading starter listening on ${port}; mode=${mode}`);
+});

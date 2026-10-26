@@ -1,0 +1,13 @@
+{
+  "name": "corvis-trading-starter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone Corvis Trading dashboard and paper-trading backend starter",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": { "express": "^4.21.2" }
+}
