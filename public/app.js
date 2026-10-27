@@ -102,6 +102,7 @@ function renderBots() {
       </div>
       <div class="bot-actions">
         ${b.enabled ? `<button class="btn btn-stop btn-sm" data-act="pause" data-id="${esc(b.id)}">Pause</button>` : `<button class="btn btn-start btn-sm" data-act="start" data-id="${esc(b.id)}">Start</button>`}
+        ${b.openPositions ? `<button class="btn btn-stop btn-sm" data-act="sellall" data-id="${esc(b.id)}">Pause &amp; sell all</button>` : ''}
         <button class="btn btn-sm" data-act="details" data-id="${esc(b.id)}">Stats &amp; wallet</button>
         <button class="btn btn-sm" data-act="edit" data-id="${esc(b.id)}">Edit</button>
         <button class="btn btn-danger btn-sm" data-act="delete" data-id="${esc(b.id)}">Delete</button>
@@ -112,9 +113,9 @@ function renderBots() {
 
 function positionRows(positions, withBot = true) {
   if (!positions.length) return '<p class="muted">No open positions.</p>';
-  return `<table><thead><tr>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>Size SOL</th><th>Entry</th><th>Now</th><th>Move</th><th>Held</th><th></th></tr></thead><tbody>${positions.map(p => {
-    const m = p.lastPrice / p.entryPrice;
-    return `<tr>${withBot ? `<td>${esc(p.botName || '')}</td>` : ''}<td>${p.pairUrl ? `<a href="${esc(p.pairUrl)}" target="_blank" rel="noopener">${esc(p.symbol)}</a>` : esc(p.symbol)} <span class="pill">${esc(p.mode)}</span></td><td>${sol(p.sizeSol)}</td><td class="mono">${Number(p.entryPrice).toPrecision(4)}</td><td class="mono">${Number(p.lastPrice).toPrecision(4)}</td><td>${signed((m - 1) * 100, 1)}%</td><td>${ago(p.openedAt)}</td><td><button class="btn btn-sm" data-close="${esc(p.id)}" data-bot="${esc(p.botId)}">Sell now</button></td></tr>`;
+  return `<table><thead><tr>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>Spent SOL</th><th title="What selling now would return, after fees">Worth SOL</th><th>P&amp;L</th><th>Held</th><th></th></tr></thead><tbody>${positions.map(p => {
+    const m = p.multiple ?? 1;
+    return `<tr>${withBot ? `<td>${esc(p.botName || '')}</td>` : ''}<td>${p.pairUrl ? `<a href="${esc(p.pairUrl)}" target="_blank" rel="noopener">${esc(p.symbol)}</a>` : esc(p.symbol)} <span class="pill">${esc(p.mode)}</span>${p.sellFailures ? ' <span class="pill pill-down">sell retrying</span>' : ''}</td><td>${sol(p.sizeSol)}</td><td>${sol(p.sizeSol * m)}</td><td>${signed((m - 1) * 100, 1)}%</td><td>${ago(p.openedAt)}</td><td><button class="btn btn-sm" data-close="${esc(p.id)}" data-bot="${esc(p.botId)}">Sell now</button></td></tr>`;
   }).join('')}</tbody></table>`;
 }
 function tradeRows(trades, withBot = true) {
@@ -138,8 +139,8 @@ function renderSide() {
 }
 
 // ---------- bot form ----------
-const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl: 'stopLossPercent', fHold: 'maxHoldMinutes', fMax: 'maxPositionSol', fOpen: 'maxOpenPositions', fLoss: 'maxDailyLossSol', fLiq: 'minLiquidityUsd', fAge: 'maxPairAgeMinutes', fBuys: 'minBuys5m', fSlip: 'slippageBps', fTrail: 'trailingStopPercent', fRatio: 'minBuySellRatio', fPrio: 'priorityFeeSol', fImpact: 'maxPriceImpactPct' };
-const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.45, stopLossPercent: 15, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 5000, maxPairAgeMinutes: 30, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.2, priorityFeeSol: 0.0005, maxPriceImpactPct: 8 };
+const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl: 'stopLossPercent', fHold: 'maxHoldMinutes', fMax: 'maxPositionSol', fOpen: 'maxOpenPositions', fLoss: 'maxDailyLossSol', fLiq: 'minLiquidityUsd', fAge: 'maxPairAgeMinutes', fBuys: 'minBuys5m', fSlip: 'slippageBps', fTrail: 'trailingStopPercent', fRatio: 'minBuySellRatio', fPrio: 'priorityFeeSol', fImpact: 'maxPriceImpactPct', fRound: 'maxRoundTripPct', fHolders: 'minHolders', fTop: 'maxTopHoldersPct' };
+const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.45, stopLossPercent: 15, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 8000, maxPairAgeMinutes: 30, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.2, priorityFeeSol: 0.0003, maxPriceImpactPct: 8, maxRoundTripPct: 6, minHolders: 40, maxTopHoldersPct: 35 };
 function requireUnlock() { if (adminToken) return true; $('#unlockDialog').showModal(); return false; }
 function openBotForm(bot) {
   if (!requireUnlock()) return;
@@ -147,8 +148,17 @@ function openBotForm(bot) {
   $('#botDialogTitle').textContent = bot ? `Edit ${bot.name}` : 'New bot';
   $('#botSubmit').textContent = bot ? 'Save changes' : 'Create bot';
   for (const [id, key] of Object.entries(fields)) $(`#${id}`).value = (bot || defaults)[key] ?? defaults[key];
+  feeHint();
   $('#botDialog').showModal();
 }
+// Network + priority fees on the buy and the sell, as a share of the position size.
+function feeHint() {
+  const size = Number($('#fMax').value), fee = Number($('#fPrio').value) + 0.000005;
+  const pctCost = size > 0 ? fee * 2 / size * 100 : 0;
+  $('#feeHint').innerHTML = size > 0 ? `Fees take about <b class="${pctCost > 3 ? 'down' : ''}">${pctCost.toFixed(1)}%</b> of each trade (buy + sell).${pctCost > 3 ? ' That is a lot: use a bigger position or a lower priority fee.' : ''}` : '';
+}
+$('#fMax').addEventListener('input', feeHint);
+$('#fPrio').addEventListener('input', feeHint);
 $('#newBot').addEventListener('click', () => openBotForm(null));
 $('#botForm').addEventListener('submit', async e => {
   if (e.submitter?.value !== 'save') return;
@@ -185,7 +195,13 @@ document.addEventListener('click', async e => {
       if (bot.mode === 'live' && !confirm(`Start ${bot.name} LIVE? It will spend real SOL from its wallet, up to ${bot.maxPositionSol} SOL per trade.`)) return;
       await api(`/api/bots/${encodeURIComponent(bot.id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: true }) }); toast(`${bot.name} started`);
     }
-    if (act.dataset.act === 'pause') { await api(`/api/bots/${encodeURIComponent(bot.id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: false }) }); toast(`${bot.name} paused. Open positions are still managed.`); }
+    if (act.dataset.act === 'pause') { await api(`/api/bots/${encodeURIComponent(bot.id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: false }) }); toast(`${bot.name} paused: no new buys. Its open positions still sell on their exit rules; use Pause & sell all to exit now.`); }
+    if (act.dataset.act === 'sellall') {
+      if (!confirm(`Pause ${bot.name} and sell all ${bot.openPositions} open position(s) at market now?`)) return;
+      act.disabled = true;
+      const r = await post(`/api/bots/${encodeURIComponent(bot.id)}/sell-all`, {});
+      toast(r.failed.length ? `${bot.name} paused. Sold ${r.sold}; ${r.failed.length} could not sell yet and will keep retrying.` : `${bot.name} paused and sold ${r.sold} position(s).`, r.failed.length > 0);
+    }
     if (act.dataset.act === 'delete') {
       if (!confirm(`Delete ${bot.name}? This is only allowed once its wallet is empty.`)) return;
       await api(`/api/bots/${encodeURIComponent(bot.id)}`, { method: 'DELETE', body: JSON.stringify({ confirm: true }) }); toast(`${bot.name} deleted`);

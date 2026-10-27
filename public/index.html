@@ -96,17 +96,23 @@
     </div>
     <h4>Entry filters</h4>
     <div class="row3">
-      <label>Min liquidity (USD) <input id="fLiq" type="number" min="0" step="100" value="5000" required></label>
+      <label>Min liquidity (USD) <input id="fLiq" type="number" min="0" step="100" value="8000" required></label>
       <label>Max pair age (min) <input id="fAge" type="number" min="1" max="10080" step="1" value="30" required></label>
       <label>Min buys (last 5m) <input id="fBuys" type="number" min="0" step="1" value="10" required></label>
     </div>
     <div class="row3">
       <label>Min buy/sell ratio <input id="fRatio" type="number" min="0" max="20" step=".1" value="1.2" required></label>
       <label>Slippage (bps) <input id="fSlip" type="number" min="10" max="5000" step="10" value="500" required></label>
-      <label>Priority fee (max SOL) <input id="fPrio" type="number" min="0" max="0.01" step="0.0001" value="0.0005" required></label>
+      <label>Priority fee (max SOL) <input id="fPrio" type="number" min="0" max="0.01" step="0.0001" value="0.0003" required></label>
     </div>
-    <label>Max price impact (%, 0 = off) <input id="fImpact" type="number" min="0" max="100" step="0.5" value="8" required></label>
-    <p class="muted small">Tokens are skipped unless mint and freeze authority are revoked. Each bot has its own encrypted wallet; you can withdraw or export its key at any time.</p>
+    <div class="row3">
+      <label>Max price impact (%, 0 = off) <input id="fImpact" type="number" min="0" max="100" step="0.5" value="8" required></label>
+      <label>Max round-trip cost (%, 0 = off) <input id="fRound" type="number" min="0" max="100" step="0.5" value="6" required></label>
+      <label>Min holders <input id="fHolders" type="number" min="0" step="1" value="40" required></label>
+    </div>
+    <label>Max held by top 10 wallets (%, 0 = off) <input id="fTop" type="number" min="0" max="100" step="1" value="35" required></label>
+    <p class="muted small" id="feeHint"></p>
+    <p class="muted small">Before every buy the bot quotes buying and selling straight back, and skips tokens that can't be sold or would lose more than the round-trip limit. Take profit and stop loss use what selling would actually return after fees. Tokens are skipped unless mint and freeze authority are revoked. Each bot has its own encrypted wallet; you can withdraw or export its key at any time.</p>
     <div class="actions">
       <button class="btn btn-ghost" value="cancel" formnovalidate>Cancel</button>
       <button class="btn btn-primary" id="botSubmit" value="save">Create bot</button>

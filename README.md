@@ -4,13 +4,15 @@ A Solana sniper bot dashboard. Each bot has its own encrypted wallet, scans newl
 
 ## How a bot trades
 The engine runs two loops:
-- **Every 2 s (`ENGINE_MONITOR_MS`)** it reprices every open position, including those of paused bots, and sells on take profit (×), stop loss (%), trailing stop (% off the peak, which arms once the position is up by that much) or max hold time. A bot whose realized loss today reaches `maxDailyLossSol` is stopped.
+- **Every 1 s (`ENGINE_MONITOR_MS`)** it checks every open position, including those of paused bots. A position's value is **what selling it right now would return after fees**, from a real Jupiter sell quote (refreshed at least every 15 s, and always re-quoted before a sell). Take profit (×), stop loss (%), trailing stop (% off the peak, which arms once the position is up by that much and never lets an armed winner fall below break-even) and max hold all use that value, so a "take profit" is always a profit. The spot price feed is only used to decide when to look closer. A bot whose realized loss today reaches `maxDailyLossSol` is stopped.
 - **Every 6 s (`ENGINE_SCAN_MS`)** it refreshes a watchlist of up to 120 new tokens from GeckoTerminal's newest pools, plus DexScreener's latest profiles and boosts when DexScreener isn't rate-limiting (it often blocks shared hosting IPs, so it's optional). Prices for open positions come from Jupiter's price API. Every watched token is re-checked on each scan, so a launch that starts quiet can still be bought once it picks up. Newest launches are checked first.
 
-A token is bought only if it passes the bot's filters: minimum USD liquidity, maximum pair age, minimum buys in the last 5 minutes, and a buy/sell ratio (momentum). Its **mint and freeze authority must also both be revoked**. A bot never buys the same token twice.
+A token is bought only if it passes the bot's filters: minimum USD liquidity, maximum pair age, minimum buys in the last 5 minutes, a buy/sell ratio (momentum), minimum holders and a cap on how much the top 10 wallets hold. Its **mint and freeze authority must also both be revoked**. Right before buying, the bot quotes the buy *and* selling straight back: tokens with no sell route (honeypots), transfer taxes, or a round trip costing more than `maxRoundTripPct` (default 6%) are skipped. A bot never buys the same token twice, and a token that fails a check is left alone for 5 minutes.
 
-- **Paper:** simulated at the DexScreener price with a 1% cost on each side, against the bot's 1 SOL paper balance.
-- **Live:** quoted and swapped through Jupiter with a `veryHigh` priority fee (capped per bot) and dynamic slippage. Transactions skip preflight and are rebroadcast every 2 s until confirmed or expired. Entry price is the price actually paid. P&L comes from the wallet's real SOL change, and emptied token accounts are closed so their ~0.002 SOL rent comes back. One bot's swaps never overlap. A position that fails to sell 5 times in a row (usually a rug with no liquidity left) is booked as a total loss, and its tokens stay in the wallet.
+**Pause** stops new buys; open positions still sell on their exit rules. **Pause & sell all** sells everything now.
+
+- **Paper:** filled from real Jupiter quotes plus network and priority fees, against the bot's 1 SOL paper balance, so results match what live would have done. Priority fees are charged at the cap you set; on small positions they add up fast (0.0005 SOL each way is 10% of a 0.01 SOL trade), and the bot form shows the fee share as you type.
+- **Live:** quoted and swapped through Jupiter with a `veryHigh` priority fee (capped per bot) and dynamic slippage. Transactions skip preflight and are rebroadcast every 2 s until confirmed or expired. Entry price is the price actually paid. P&L comes from the wallet's real SOL change, and emptied token accounts are closed so their ~0.002 SOL rent comes back. One bot's swaps never overlap. A position that keeps failing to sell for 10+ minutes (usually a rug with no liquidity left) is booked as a total loss, and its tokens stay in the wallet.
 
 ## Testing it
 - `npm test` runs unit tests plus three simulated market sessions. Each checks that live P&L matches the wallet balance exactly, that no token with an active mint authority is ever bought, and that every position gets closed.
@@ -20,7 +22,7 @@ A token is bought only if it passes the bot's filters: minimum USD liquidity, ma
 
 ## Speed and rate limits (read before going live)
 Free market-data APIs rate-limit shared hosting like Render. Testing on Render showed HTTP 429s from DexScreener, GeckoTerminal, Jupiter's free tier and the public Solana RPC. The engine copes: each feed cools down after a 429 and the others carry on, and Jupiter calls run on a budget that always keeps 40% for real quotes and swaps. For fast, reliable live trading, add two free keys:
-- **`JUPITER_API_KEY`** from portal.jup.ag. It switches to `api.jup.ag` with higher limits and tightens the loops to 1 s for positions and 3 s for scans.
+- **`JUPITER_API_KEY`** from portal.jup.ag. It switches to `api.jup.ag`. The free key allows about 60 requests a minute; on a paid plan set `JUPITER_RPM` to its limit so the bots can quote more often.
 - **A private RPC** for `SOLANA_RPC_URL` (and `MARKET_RPC_URL`), for example Helius's free plan. The public RPC rate-limits quickly.
 
 This is a fast polling sniper: it typically buys within seconds to a minute of a pool appearing in the feeds. It does not compete for the first block of a launch, which needs paid streaming (Yellowstone gRPC) and Jito bundles.
