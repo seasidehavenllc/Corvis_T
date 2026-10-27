@@ -41,7 +41,8 @@ const FOLLOW_TTL_MS = 2 * 60_000;
 export const MAX_FOLLOWED = 10;
 // Coins a followed wallet buys are usually minutes old and still small, so the filters that only judge
 // how established a coin is are left out for them. Mint authority, whale, rug and cost checks still apply.
-const FOLLOW_IGNORES = new Set(['age', 'too_new', 'buys', 'momentum', 'holders', 'organic', 'seeded_pool']);
+const FOLLOW_IGNORES = new Set(['age', 'too_new', 'buys', 'momentum', 'holders', 'organic', 'seeded_pool', 'unknown_holders']);
+const HOLDER_LOOKUP_MS = 2 * 60_000; // a coin's holder count looked up from Jupiter is reused this long
 // Finding wallets to copy: a coin that has run this far since the bot first saw it is checked for the
 // wallets that bought early and sold for a profit; those wallets are then graded on their whole recent record.
 const SCOUT_MULTIPLE = 3;
@@ -97,7 +98,8 @@ export const STRATEGY_DEFAULTS = {
   partialSellPercent: 50,
   maxSingleHolderPct: 10,
   maxLiquidityPerHolderUsd: 150,
-  insiderSellPct: 2,
+  insiderSellPct: 5,
+  requireHolderData: true,
   followWallets: [],
   followOnly: false,
   autoFollow: false,
@@ -144,6 +146,9 @@ export function passesFilters(pair, bot, now = Date.now()) {
   if (buys < bot.minBuys5m) reasons.push('buys');
   // Holder spread (from Jupiter's token data; skipped when a feed doesn't report it).
   if (bot.minHolders > 0 && pair.holders != null && pair.holders < bot.minHolders) reasons.push('holders');
+  // Every coin that went to zero in one tick was bought with no holder count (DexScreener and GeckoTerminal
+  // don't report one), so the seeded-pool and holder checks never ran on it. Those coins are skipped.
+  if (bot.requireHolderData && pair.holders == null) reasons.push('unknown_holders');
   if (bot.maxTopHoldersPct > 0 && pair.topHoldersPct != null && pair.topHoldersPct > bot.maxTopHoldersPct) reasons.push('concentration');
   // Momentum: more buyers than sellers in the last 5 minutes.
   if (bot.minBuySellRatio > 0 && buys < bot.minBuySellRatio * Math.max(sells, 1)) reasons.push('momentum');
@@ -1107,6 +1112,25 @@ export function createEngine({
     }
   }
 
+  // A coin from a feed without holder data is looked up on Jupiter just before buying, and the holder
+  // count and audit are copied onto its pair. Returns true when the pair now has a holder count.
+  const holderLookups = new Map(); // mint -> { at, token }
+  async function addHolderData(mint, pair, now) {
+    let hit = holderLookups.get(mint);
+    if (!hit || now - hit.at > HOLDER_LOOKUP_MS) {
+      if (!solUsd) return false;
+      try {
+        const token = (await feedJson(`${JUPITER_TOKENS}/search?query=${mint}`, 30_000) || []).find(t => t?.id === mint);
+        hit = { at: now, token: token ? jupiterPair(token) : null };
+        holderLookups.set(mint, hit);
+      } catch { return false; } // Jupiter busy or cooling down: try again next scan
+      for (const [m, h] of holderLookups) if (now - h.at > HOLDER_LOOKUP_MS) holderLookups.delete(m);
+    }
+    if (hit.token?.holders == null) return false;
+    for (const k of AUDIT_KEYS) if (pair[k] == null && hit.token[k] != null) pair[k] = hit.token[k];
+    return true;
+  }
+
   // Tokens that failed a buy check are skipped for a while instead of being re-quoted every scan.
   const rejected = new Map(); // mint -> retry after
   const skips = {};
@@ -1144,7 +1168,8 @@ export function createEngine({
           if (db.trades.some(t => t.botId === bot.id && t.mint === mint)) continue;
           if ((rejected.get(mint) || 0) > now) continue;
           const leader = leaderOf(mint);
-          const failed = passesFilters(pair, bot, now).filter(r => !leader || !FOLLOW_IGNORES.has(r));
+          let failed = passesFilters(pair, bot, now).filter(r => !leader || !FOLLOW_IGNORES.has(r));
+          if (failed.length === 1 && failed[0] === 'unknown_holders' && await addHolderData(mint, pair, now)) failed = passesFilters(pair, bot, now).filter(r => !leader || !FOLLOW_IGNORES.has(r));
           if (failed.length) { skips[failed[0]] = (skips[failed[0]] || 0) + 1; continue; }
           if (!(await mintIsSafe(mint).catch(() => false))) { skips.mint_authority = (skips.mint_authority || 0) + 1; continue; }
           try {

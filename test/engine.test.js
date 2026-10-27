@@ -8,7 +8,7 @@ function pair(overrides = {}) {
   return {
     chainId: 'solana', url: 'https://dexscreener.com/solana/x',
     baseToken: { address: MINT, symbol: 'TEST' }, quoteToken: { address: SOL_MINT },
-    priceNative: '0.001', liquidity: { usd: 20000 }, txns: { m5: { buys: 40 } },
+    priceNative: '0.001', liquidity: { usd: 20000 }, txns: { m5: { buys: 40 } }, holders: 500,
     pairCreatedAt: now - 5 * 60_000, ...overrides
   };
 }
@@ -306,6 +306,40 @@ test('the Jupiter token feed works with no open positions (SOL price is fetched 
   assert.equal(engine.health.sources.jupiter, 'ok');
 });
 
+// Every coin that went to zero in one tick (DOCK, DOGE, "4", jenny) came from a feed with no holder count.
+test('a coin with no holder count is skipped unless Jupiter can supply one', () => {
+  const d = { ...STRATEGY_DEFAULTS };
+  const blind = pair({ pairCreatedAt: now - 6 * 60_000, liquidity: { usd: 24000 }, holders: undefined, txns: { m5: { buys: 640, sells: 280 } } });
+  assert.deepEqual(passesFilters(blind, d, now), ['unknown_holders']);
+  assert.deepEqual(passesFilters(blind, { ...d, requireHolderData: false }, now), []);
+});
+test('holder count is looked up on Jupiter before buying a coin found on DexScreener', async () => {
+  const t = Date.now();
+  const scanWith = async holderCount => {
+    const urls = [];
+    let searches = 0;
+    const fetchImpl = async url => {
+      urls.push(url);
+      // The watchlist refresh finds nothing on Jupiter, so the coin comes from DexScreener without holders.
+      const body = url.includes('/price/v3') ? { [SOL_MINT]: { usdPrice: 150 } }
+        : url.includes('/tokens/v2/search') ? (searches++ ? [{ id: MINT, symbol: 'TEST', usdPrice: 0.15, liquidity: 20000, holderCount }] : [])
+        : url.includes('/quote') ? { outAmount: String(new URL(url).searchParams.get('inputMint') === SOL_MINT ? 1e8 : 9.95e7) }
+        : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }] : url.includes('token-boosts') ? [] : url.includes('dexscreener') ? [pair({ pairCreatedAt: t - 60_000, holders: undefined })] : [];
+      return { ok: true, json: async () => body };
+    };
+    const connection = { getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null, decimals: 6 } } } } }) };
+    const db = { bots: [{ ...bot, maxSingleHolderPct: 0, insiderSellPct: 0, paperBalanceSol: 1, stats: { ...bot.stats } }], trades: [], positions: [] };
+    const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => t });
+    await engine.scan();
+    return { db, urls };
+  };
+  const found = await scanWith(800);
+  assert.equal(found.urls.filter(u => u.includes(`/tokens/v2/search?query=${MINT}`)).length, 2);
+  assert.equal(found.db.positions.length, 1);
+  assert.equal(found.db.positions[0].features.holders, 800);
+  assert.equal((await scanWith(undefined)).db.positions.length, 0);
+});
+
 // Rug guard: a fake chain where the coin's biggest wallets can be read and made to sell.
 import { Keypair, PublicKey } from '@solana/web3.js';
 import { insiderWallets, rugSignal } from '../engine.js';
@@ -372,7 +406,7 @@ test('the bot sells as soon as the biggest wallets start dumping, before the pri
   assert.equal(db.positions[0].holderWatch.wallets.length, 2);
   await engine.monitor();
   assert.equal(db.positions.length, 1, 'no selling, no warning');
-  chain.accounts[1].amount = 2e13; // a 6% wallet sells 4% of the supply
+  chain.accounts[1].amount = 5e12; // a 6% wallet sells 5.5% of the supply
   await engine.monitor(); // sees the sell
   await engine.monitor(); // sells
   assert.equal(db.positions.length, 0);
