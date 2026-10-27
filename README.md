@@ -9,6 +9,12 @@ The engine runs two loops:
 
 A token is bought only if it passes the bot's filters: minimum USD liquidity, maximum pair age, minimum buys in the last 5 minutes, a buy/sell ratio (momentum), minimum holders and a cap on how much the top 10 wallets hold. Its **mint and freeze authority must also both be revoked**. Right before buying, the bot quotes the buy *and* selling straight back: tokens with no sell route (honeypots), transfer taxes, or a round trip costing more than `maxRoundTripPct` (default 6%) are skipped. A bot never buys the same token twice, and a token that fails a check is left alone for 5 minutes.
 
+**Rug filters** come from Jupiter's token audit: how much the dev wallet still holds (`maxDevHoldingPct`, default 10%), how many tokens the dev has launched before (`maxDevLaunches`, default 20, which screens out serial launchers), Jupiter's suspicious flag (always skipped), and an optional organic-activity score. `minPairAgeMinutes` can skip the first minutes of a launch, when insiders and bundled wallets usually sell.
+
+**Scaling out:** at the first target (`partialTakeProfitMultiplier`, default 1.3×) the bot sells `partialSellPercent` (default 50%) and banks it. From then on the rest of the position may not drag the whole trade below +2%; it sells at the final take profit (default 2×), the trailing stop, or that floor. This is how most profitable memecoin traders manage exits: small, repeatable wins locked in early, with a free ride on the runners.
+
+**What's working** on the dashboard groups this server's closed trades by what each token looked like at entry (age, liquidity, holders, dev share, organic score, round-trip cost and more), and shows the win rate and P&L for each range. Run bots in paper mode, then tighten the filters toward the green ranges.
+
 **Pause** stops new buys; open positions still sell on their exit rules. **Pause & sell all** sells everything now.
 
 - **Paper:** filled from real Jupiter quotes plus network and priority fees, against the bot's 1 SOL paper balance, so results match what live would have done. Priority fees are charged at the cap you set; on small positions they add up fast (0.0005 SOL each way is 10% of a 0.01 SOL trade), and the bot form shows the fee share as you type.

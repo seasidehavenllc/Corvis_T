@@ -36,8 +36,8 @@ function spark(series, height = 40) {
 
 async function refresh() {
   try {
-    const [overview, config, events, wallet] = await Promise.all([api('/api/overview'), api('/api/config'), api('/api/events'), api('/api/wallet').catch(() => null)]);
-    state = { overview, config, events, wallet };
+    const [overview, config, events, wallet, journal] = await Promise.all([api('/api/overview'), api('/api/config'), api('/api/events'), api('/api/wallet').catch(() => null), api('/api/journal').catch(() => null)]);
+    state = { overview, config, events, wallet, journal };
     render();
   } catch (e) { $('#alerts').innerHTML = `<div class="alert bad">Can't reach the server: ${esc(e.message)}</div>`; }
 }
@@ -68,7 +68,7 @@ function render() {
   $('#kOpen').textContent = o.positions.length;
   $('#kEngine').textContent = o.engine?.lastTickAt ? `engine scanned ${ago(o.engine.lastTickAt)} ago · ${o.engine.candidates} candidates` : 'engine starting…';
 
-  renderBots(); renderPositions(); renderTrades(); renderSide();
+  renderBots(); renderPositions(); renderTrades(); renderSide(); renderJournal();
 }
 
 function renderBots() {
@@ -95,7 +95,7 @@ function renderBots() {
         <div class="stat"><b>${b.openPositions}/${b.maxOpenPositions}</b><span>Open</span></div>
       </div>
       <div class="chips">
-        <span class="chip">TP ${esc(b.takeProfitMultiplier)}×</span><span class="chip">SL ${esc(b.stopLossPercent)}%</span>
+        ${b.partialSellPercent > 0 ? `<span class="chip">bank ${esc(b.partialSellPercent)}% @ ${esc(b.partialTakeProfitMultiplier)}×</span>` : ''}<span class="chip">TP ${esc(b.takeProfitMultiplier)}×</span><span class="chip">SL ${esc(b.stopLossPercent)}%</span>
         <span class="chip">${esc(b.maxPositionSol)} SOL/trade</span><span class="chip">liq ≥ $${Number(b.minLiquidityUsd).toLocaleString()}</span>
         <span class="chip">age ≤ ${esc(b.maxPairAgeMinutes)}m</span><span class="chip">hold ≤ ${esc(b.maxHoldMinutes)}m</span>
         ${b.trailingStopPercent ? `<span class="chip">trail ${esc(b.trailingStopPercent)}%</span>` : ''}
@@ -115,12 +115,19 @@ function positionRows(positions, withBot = true) {
   if (!positions.length) return '<p class="muted">No open positions.</p>';
   return `<table><thead><tr>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>Spent SOL</th><th title="What selling now would return, after fees">Worth SOL</th><th>P&amp;L</th><th>Held</th><th></th></tr></thead><tbody>${positions.map(p => {
     const m = p.multiple ?? 1;
-    return `<tr>${withBot ? `<td>${esc(p.botName || '')}</td>` : ''}<td>${p.pairUrl ? `<a href="${esc(p.pairUrl)}" target="_blank" rel="noopener">${esc(p.symbol)}</a>` : esc(p.symbol)} <span class="pill">${esc(p.mode)}</span>${p.sellFailures ? ' <span class="pill pill-down">sell retrying</span>' : ''}</td><td>${sol(p.sizeSol)}</td><td>${sol(p.sizeSol * m)}</td><td>${signed((m - 1) * 100, 1)}%</td><td>${ago(p.openedAt)}</td><td><button class="btn btn-sm" data-close="${esc(p.id)}" data-bot="${esc(p.botId)}">Sell now</button></td></tr>`;
+    return `<tr>${withBot ? `<td>${esc(p.botName || '')}</td>` : ''}<td>${p.pairUrl ? `<a href="${esc(p.pairUrl)}" target="_blank" rel="noopener">${esc(p.symbol)}</a>` : esc(p.symbol)} <span class="pill">${esc(p.mode)}</span>${p.partialDone ? ' <span class="pill pill-up">part banked</span>' : ''}${p.sellFailures ? ' <span class="pill pill-down">sell retrying</span>' : ''}</td><td>${sol(p.sizeSol)}</td><td>${sol(p.sizeSol * m)}</td><td>${signed((m - 1) * 100, 1)}%</td><td>${ago(p.openedAt)}</td><td><button class="btn btn-sm" data-close="${esc(p.id)}" data-bot="${esc(p.botId)}">Sell now</button></td></tr>`;
   }).join('')}</tbody></table>`;
 }
 function tradeRows(trades, withBot = true) {
   if (!trades.length) return '<p class="muted">No trades yet.</p>';
-  return `<table><thead><tr><th>Closed</th>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>In SOL</th><th>Out SOL</th><th>P&amp;L</th><th>Exit</th><th></th></tr></thead><tbody>${trades.map(t => `<tr><td>${ago(t.closedAt)} ago</td>${withBot ? `<td>${esc(t.botName || '')}</td>` : ''}<td>${esc(t.symbol)} <span class="pill">${esc(t.mode)}</span></td><td>${sol(t.entrySol)}</td><td>${sol(t.exitSol)}</td><td>${signed(t.pnlSol)}</td><td>${esc(String(t.reason).replace('_', ' '))}</td><td>${explorer(t.sellSignature)}</td></tr>`).join('')}</tbody></table>`;
+  return `<table><thead><tr><th>Closed</th>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>In SOL</th><th>Out SOL</th><th>P&amp;L</th><th>Exit</th><th></th></tr></thead><tbody>${trades.map(t => `<tr><td>${ago(t.closedAt)} ago</td>${withBot ? `<td>${esc(t.botName || '')}</td>` : ''}<td>${esc(t.symbol)} <span class="pill">${esc(t.mode)}</span></td><td>${sol(t.entrySol)}</td><td>${sol(t.exitSol)}</td><td>${signed(t.pnlSol)}</td><td>${esc(REASONS[t.reason] || String(t.reason).replace('_', ' '))}${t.partialSol ? ' <span class="muted small">(part banked)</span>' : ''}</td><td>${explorer(t.sellSignature)}</td></tr>`).join('')}</tbody></table>`;
+}
+// Which entry signals have actually paid off, from this server's own closed trades.
+function renderJournal() {
+  const j = state.journal;
+  if (!j || j.trades < 5) { $('#journal').innerHTML = `<p class="muted small">Shows which signals win once there are 5+ closed trades (${j?.trades || 0} so far).</p>`; return; }
+  $('#journal').innerHTML = `<p class="muted small">${j.trades} trades. Green ranges are making money; tighten filters toward them.</p>` + j.signals.filter(sig => sig.ranges.some(r => r.trades)).map(sig => `
+    <div class="jrow"><div class="small"><b>${esc(sig.label)}</b></div><div class="jcells">${sig.ranges.map(r => `<div class="jcell ${r.trades ? (r.pnlSol > 0 ? 'jup' : 'jdown') : ''}" title="${r.trades} trades, P&amp;L ${r.pnlSol.toFixed(4)} SOL"><span>${esc(r.label)}</span><b>${r.trades ? pct(r.winRate) : '–'}</b><span class="muted">${r.trades}×</span></div>`).join('')}</div></div>`).join('');
 }
 function renderPositions() { $('#positions').innerHTML = positionRows(state.overview.positions); }
 function renderTrades() { $('#trades').innerHTML = tradeRows(state.overview.recentTrades.slice(0, 25)); }
@@ -139,8 +146,9 @@ function renderSide() {
 }
 
 // ---------- bot form ----------
-const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl: 'stopLossPercent', fHold: 'maxHoldMinutes', fMax: 'maxPositionSol', fOpen: 'maxOpenPositions', fLoss: 'maxDailyLossSol', fLiq: 'minLiquidityUsd', fAge: 'maxPairAgeMinutes', fBuys: 'minBuys5m', fSlip: 'slippageBps', fTrail: 'trailingStopPercent', fRatio: 'minBuySellRatio', fPrio: 'priorityFeeSol', fImpact: 'maxPriceImpactPct', fRound: 'maxRoundTripPct', fHolders: 'minHolders', fTop: 'maxTopHoldersPct' };
-const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.45, stopLossPercent: 15, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 8000, maxPairAgeMinutes: 30, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.2, priorityFeeSol: 0.0003, maxPriceImpactPct: 8, maxRoundTripPct: 6, minHolders: 40, maxTopHoldersPct: 35 };
+const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl: 'stopLossPercent', fHold: 'maxHoldMinutes', fMax: 'maxPositionSol', fOpen: 'maxOpenPositions', fLoss: 'maxDailyLossSol', fLiq: 'minLiquidityUsd', fAge: 'maxPairAgeMinutes', fBuys: 'minBuys5m', fSlip: 'slippageBps', fTrail: 'trailingStopPercent', fRatio: 'minBuySellRatio', fPrio: 'priorityFeeSol', fImpact: 'maxPriceImpactPct', fRound: 'maxRoundTripPct', fHolders: 'minHolders', fTop: 'maxTopHoldersPct', fPartTp: 'partialTakeProfitMultiplier', fPartPct: 'partialSellPercent', fDev: 'maxDevHoldingPct', fDevMints: 'maxDevLaunches', fOrganic: 'minOrganicScore', fMinAge: 'minPairAgeMinutes' };
+const REASONS = { take_profit: 'take profit', stop_loss: 'stop loss', trailing_stop: 'trailing stop', max_hold: 'time limit', protect_profit: 'kept profit', unsellable: 'unsellable', manual: 'sold by you' };
+const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 2, stopLossPercent: 15, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 8000, maxPairAgeMinutes: 30, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.2, priorityFeeSol: 0.0003, maxPriceImpactPct: 8, maxRoundTripPct: 6, minHolders: 40, maxTopHoldersPct: 35, partialTakeProfitMultiplier: 1.3, partialSellPercent: 50, maxDevHoldingPct: 10, maxDevLaunches: 20, minOrganicScore: 0, minPairAgeMinutes: 0 };
 function requireUnlock() { if (adminToken) return true; $('#unlockDialog').showModal(); return false; }
 function openBotForm(bot) {
   if (!requireUnlock()) return;

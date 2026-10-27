@@ -95,3 +95,10 @@ dialog::backdrop { background: rgba(0,0,0,.6); }
 
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--panel-2); border: 1px solid var(--border); padding: 10px 16px; border-radius: 10px; z-index: 50; max-width: calc(100vw - 32px); }
 .toast.error { border-color: var(--down); color: #fca5a5; }
+
+.jrow { margin: 8px 0; }
+.jcells { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin-top: 4px; }
+.jcell { border: 1px solid var(--border); border-radius: 6px; padding: 4px; display: flex; flex-direction: column; align-items: center; font-size: 11px; min-width: 0; }
+.jcell span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.jcell.jup { border-color: #1f8f5a; background: rgba(31, 143, 90, .12); }
+.jcell.jdown { border-color: #a33a3a; background: rgba(163, 58, 58, .12); }

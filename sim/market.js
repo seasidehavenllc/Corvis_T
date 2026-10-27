@@ -34,7 +34,7 @@ export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:0
       price: 1e-6 * (0.5 + rand()), liquidityUsd: realLiq,
       // Feeds often overstate liquidity for brand-new pools, and price APIs lag the pool.
       reportedLiquidityUsd: realLiq * (1 + rand() * 2), apiPrice: null, apiLagMs: 10_000 + rand() * 50_000, priceLog: [],
-      holders: Math.floor(10 + rand() * 300), topHoldersPct: 10 + rand() * 60,
+      holders: Math.floor(10 + rand() * 300), topHoldersPct: 10 + rand() * 60, devPct: rand() * 15, devMints: Math.floor(rand() * 40),
       mintAuthority: rand() < 0.2 ? Keypair.generate().publicKey.toBase58() : null,
       rugAt: state.now + (3 + rand() * 20) * 60_000, peakAt: state.now + (2 + rand() * 10) * 60_000,
       history: [], buys5m: 0, sells5m: 0, dead: false
@@ -103,7 +103,7 @@ export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:0
       })) });
     }
     if (u.pathname.startsWith('/tokens/v2/')) {
-      const jup = t => ({ id: t.mint, symbol: t.symbol, usdPrice: (t.apiPrice ?? t.price) * 150, liquidity: t.reportedLiquidityUsd, holderCount: t.holders, audit: { topHoldersPercentage: t.topHoldersPct }, stats5m: { numBuys: t.buys5m, numSells: t.sells5m }, firstPool: { id: `pool_${t.mint}`, createdAt: new Date(t.createdAt).toISOString() } });
+      const jup = t => ({ id: t.mint, symbol: t.symbol, usdPrice: (t.apiPrice ?? t.price) * 150, liquidity: t.reportedLiquidityUsd, holderCount: t.holders, audit: { topHoldersPercentage: t.topHoldersPct, devBalancePercentage: t.devPct, devMints: t.devMints }, stats5m: { numBuys: t.buys5m, numSells: t.sells5m }, firstPool: { id: `pool_${t.mint}`, createdAt: new Date(t.createdAt).toISOString() } });
       if (u.pathname.endsWith('/recent')) return ok([...state.tokens.values()].filter(t => state.now - t.createdAt < 10 * 60_000).sort((a, b) => b.createdAt - a.createdAt).slice(0, 30).map(jup));
       return ok(u.searchParams.get('query').split(',').map(m => state.tokens.get(m)).filter(Boolean).map(jup));
     }
