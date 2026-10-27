@@ -11,7 +11,7 @@ A token is bought only if it passes the bot's filters: minimum USD liquidity, ma
 
 **Rug filters** come from Jupiter's token audit: how much the dev wallet still holds (`maxDevHoldingPct`, default 10%), how many tokens the dev has launched before (`maxDevLaunches`, default 20, which screens out serial launchers), Jupiter's suspicious flag (always skipped), and an optional organic-activity score. `minPairAgeMinutes` can skip the first minutes of a launch, when insiders and bundled wallets usually sell.
 
-**Scaling out:** at the first target (`partialTakeProfitMultiplier`, default 1.3×) the bot sells `partialSellPercent` (default 50%) and banks it. From then on the rest of the position may not drag the whole trade below +2%; it sells at the final take profit (default 2×), the trailing stop, or that floor. This is how most profitable memecoin traders manage exits: small, repeatable wins locked in early, with a free ride on the runners.
+**Scaling out:** at the first target (`partialTakeProfitMultiplier`, default 1.3×) the bot sells `partialSellPercent` (default 50%) and banks it. From then on the rest of the position may not drag the whole trade below +2%; it sells at the final take profit (default 1.5×, i.e. +50% after fees), the trailing stop, or that floor. This is how most profitable memecoin traders manage exits: small, repeatable wins locked in early, with a free ride on the runners.
 
 **What's working** on the dashboard groups this server's closed trades by what each token looked like at entry (age, liquidity, holders, dev share, organic score, round-trip cost and more), and shows the win rate and P&L for each range. Run bots in paper mode, then tighten the filters toward the green ranges.
 
