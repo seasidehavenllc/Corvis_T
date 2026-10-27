@@ -131,6 +131,10 @@
     <label>Max pool $ per holder (0 = off) <input id="fLiqHolder" type="number" min="0" step="any" value="150" required></label>
     <label>Max held by one wallet (%, 0 = off) <input id="fWhale" type="number" min="0" max="100" step="any" value="10" required></label>
     <label>Rug warning: sell when top wallets dump (% of supply, 0 = off) <input id="fInsider" type="number" min="0" max="100" step="any" value="2" required></label>
+    <h4>Copy trading</h4>
+    <label>Wallets to follow (one per line, up to 10) <textarea id="fFollow" rows="3" spellcheck="false" autocapitalize="off" placeholder="Paste Solana wallet addresses of traders with a good record"></textarea></label>
+    <label class="check"><input id="fFollowOnly" type="checkbox"> Only buy what these wallets buy</label>
+    <p class="muted small">When a followed wallet buys a coin, the bot buys it too (after its rug and cost checks) and sells when that wallet sells, or on its own exit rules, whichever comes first.</p>
     <p class="muted small">0 turns a filter off. Flagged tokens (Jupiter's suspicious tag) are always skipped.</p>
     <p class="muted small" id="feeHint"></p>
     <p class="muted small">Before every buy the bot quotes buying and selling straight back, and skips tokens that can't be sold or would lose more than the round-trip limit. Take profit and stop loss use what selling would actually return after fees. Tokens are skipped unless mint and freeze authority are revoked. Each bot has its own encrypted wallet; you can withdraw or export its key at any time.</p>

@@ -79,7 +79,7 @@ th { color: var(--muted); font-weight: 500; font-size: 12px; } tr:last-child td 
 .stack { display: flex; flex-direction: column; gap: 10px; }
 label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
-input, select { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit; width: 100%; }
+input, select, textarea { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit; width: 100%; }
 input[type=checkbox] { width: auto; }
 input:focus, select:focus { outline: none; border-color: var(--accent); }
 .row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }

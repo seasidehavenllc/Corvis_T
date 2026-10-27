@@ -1,6 +1,6 @@
 import express from 'express';
 import { calculateDevFeeLamports } from './policy.js';
-import { createEngine, STRATEGY_DEFAULTS, tradeJournal } from './engine.js';
+import { createEngine, STRATEGY_DEFAULTS, MAX_FOLLOWED, tradeJournal } from './engine.js';
 import { deriveBotKeypair as deriveFromKey, scanDerivedWallets } from './wallets.js';
 import { runSelfTest } from './selftest.js';
 import path from 'node:path';
@@ -310,7 +310,16 @@ function validateBotSettings(body, current = {}) {
   if (!(Number.isInteger(strategy.slippageBps) && strategy.slippageBps >= 10 && strategy.slippageBps <= 5000)) return { error: 'Slippage must be 10 to 5000 bps.' };
   if (!(strategy.maxDailyLossSol > 0)) return { error: 'Daily loss limit must be greater than 0.' };
   const stopLossFollowsPrice = Boolean(body?.stopLossFollowsPrice ?? current.stopLossFollowsPrice ?? STRATEGY_DEFAULTS.stopLossFollowsPrice);
-  return { name, takeProfitMultiplier, stopLossPercent, stopLossFollowsPrice, maxPositionSol, mode, ...strategy };
+  // Wallets to copy: pasted one per line (or comma separated), checked to be real Solana addresses.
+  const rawFollow = body?.followWallets ?? current.followWallets ?? [];
+  const followWallets = [...new Set((Array.isArray(rawFollow) ? rawFollow : String(rawFollow).split(/[\s,]+/)).map(w => String(w).trim()).filter(Boolean))];
+  if (followWallets.length > MAX_FOLLOWED) return { error: `Follow at most ${MAX_FOLLOWED} wallets.` };
+  for (const w of followWallets) {
+    try { new PublicKey(w); } catch { return { error: `Not a Solana wallet address: ${w.slice(0, 50)}` }; }
+  }
+  const followOnly = Boolean(body?.followOnly ?? current.followOnly ?? false);
+  if (followOnly && !followWallets.length) return { error: 'Add at least one wallet to follow, or turn off "only buy what they buy".' };
+  return { name, takeProfitMultiplier, stopLossPercent, stopLossFollowsPrice, maxPositionSol, mode, ...strategy, followWallets, followOnly };
 }
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
