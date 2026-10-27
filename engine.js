@@ -4,7 +4,11 @@ import { randomUUID } from 'node:crypto';
 
 export const SOL_MINT = 'So11111111111111111111111111111111111111112';
 export const DEXSCREENER = 'https://api.dexscreener.com';
-export const GECKOTERMINAL = 'https://api.geckoterminal.com/api/v2';
+// A free CoinGecko demo key (COINGECKO_API_KEY) moves GeckoTerminal requests to CoinGecko's on-chain API,
+// which has its own 30-a-minute limit instead of one shared with every app on Render's outbound IP.
+const CG_KEY = process.env.COINGECKO_API_KEY || '';
+export const GECKOTERMINAL = CG_KEY ? 'https://api.coingecko.com/api/v3/onchain' : 'https://api.geckoterminal.com/api/v2';
+const GECKO_HEADERS = CG_KEY ? { 'x-cg-demo-api-key': CG_KEY } : {};
 // A key from portal.jup.ag (JUPITER_API_KEY) moves requests to api.jup.ag. The free key allows about
 // 60 requests a minute; set JUPITER_RPM to your plan's limit if you upgrade.
 const JUP_KEY = process.env.JUPITER_API_KEY || '';
@@ -330,7 +334,8 @@ export function createEngine({
   async function getJson(url, init, { priority = false } = {}) {
     const jup = new URL(url).host === JUP_HOST;
     if (jup) await takeJupiter(priority);
-    const res = await fetchImpl(url, { ...init, headers: { accept: 'application/json', ...(jup ? JUPITER_HEADERS : {}), ...(init?.headers || {}) } });
+    const gecko = url.startsWith(GECKOTERMINAL);
+    const res = await fetchImpl(url, { ...init, headers: { accept: 'application/json', ...(jup ? JUPITER_HEADERS : {}), ...(gecko ? GECKO_HEADERS : {}), ...(init?.headers || {}) } });
     if (!res.ok) {
       // Jupiter counts its limit over a rolling window; after a 429 everyone waits ~3 s so the next
       // request (often a sell) isn't refused too.
