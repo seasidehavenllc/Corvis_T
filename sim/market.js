@@ -16,7 +16,7 @@ function rng(seed) {
   return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 2 ** 32; };
 }
 
-export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:00Z'), launchEveryMs = 90_000 } = {}) {
+export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:00Z'), launchEveryMs = 90_000, dexScreenerDown = false } = {}) {
   const rand = rng(seed);
   const state = { now: start, tokens: new Map(), wallets: new Map(), pending: new Map(), sent: new Map(), nextLaunch: start, stats: { swaps: 0, closes: 0, quotes: 0 } };
   const gauss = () => Math.sqrt(-2 * Math.log(rand() || 1e-9)) * Math.cos(2 * Math.PI * rand());
@@ -85,8 +85,20 @@ export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:0
     const u = new URL(url);
     if (u.host === 'api.geckoterminal.com') {
       const recent = [...state.tokens.values()].filter(t => state.now - t.createdAt < 10 * 60_000);
-      return ok({ data: recent.map(t => ({ relationships: { base_token: { data: { id: `solana_${t.mint}` } }, quote_token: { data: { id: `solana_${SOL_MINT}` } } } })) });
+      const page = Number(u.searchParams.get('page') || 1);
+      const slice = recent.sort((a, b) => b.createdAt - a.createdAt).slice((page - 1) * 20, page * 20);
+      return ok({ data: slice.map(t => ({
+        attributes: { address: `pool_${t.mint}`, name: `${t.symbol} / SOL`, base_token_price_native_currency: String(t.price), reserve_in_usd: String(t.liquidityUsd), pool_created_at: new Date(t.createdAt).toISOString(), transactions: { m5: { buys: t.buys5m, sells: t.sells5m } } },
+        relationships: { base_token: { data: { id: `solana_${t.mint}` } }, quote_token: { data: { id: `solana_${SOL_MINT}` } }, dex: { data: { id: 'raydium' } } }
+      })) });
     }
+    if (u.pathname.startsWith('/price/v3')) {
+      const SOL_USD = 150;
+      const out = { [SOL_MINT]: { usdPrice: SOL_USD } };
+      for (const id of u.searchParams.get('ids').split(',')) { const t = state.tokens.get(id); if (t) out[id] = { usdPrice: t.price * SOL_USD }; }
+      return ok(out);
+    }
+    if (dexScreenerDown && u.host === 'api.dexscreener.com') return { ok: false, status: 429, json: async () => ({}) };
     if (u.pathname.startsWith('/token-profiles') || u.pathname.startsWith('/token-boosts')) return ok([]);
     if (u.pathname.startsWith('/tokens/v1/solana/')) {
       const mints = u.pathname.split('/').pop().split(',');

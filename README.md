@@ -5,7 +5,7 @@ A Solana sniper bot dashboard. Each bot has its own encrypted wallet, scans newl
 ## How a bot trades
 The engine runs two loops:
 - **Every 2 s (`ENGINE_MONITOR_MS`)** it reprices every open position, including those of paused bots, and sells on take profit (×), stop loss (%), trailing stop (% off the peak, which arms once the position is up by that much) or max hold time. A bot whose realized loss today reaches `maxDailyLossSol` is stopped.
-- **Every 5 s (`ENGINE_SCAN_MS`)** it refreshes a watchlist of up to 120 new tokens from GeckoTerminal's new pools and DexScreener's latest profiles and boosts. Every watched token is re-checked on each scan, so a launch that starts quiet can still be bought once it picks up. Newest launches are checked first.
+- **Every 6 s (`ENGINE_SCAN_MS`)** it refreshes a watchlist of up to 120 new tokens from GeckoTerminal's newest pools, plus DexScreener's latest profiles and boosts when DexScreener isn't rate-limiting (it often blocks shared hosting IPs, so it's optional). Prices for open positions come from Jupiter's price API. Every watched token is re-checked on each scan, so a launch that starts quiet can still be bought once it picks up. Newest launches are checked first.
 
 A token is bought only if it passes the bot's filters: minimum USD liquidity, maximum pair age, minimum buys in the last 5 minutes, and a buy/sell ratio (momentum). Its **mint and freeze authority must also both be revoked**. A bot never buys the same token twice.
 

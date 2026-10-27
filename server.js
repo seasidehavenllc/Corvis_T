@@ -504,7 +504,7 @@ app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: e
 const engine = createEngine({
   db: new Proxy({}, { get: (_t, k) => db[k], set: (_t, k, v) => { db[k] = v; return true; } }),
   save: saveDb, log, connection, marketConnection, getKeypair: botKeypair, liveAllowed: LIVE_TRADING_ENABLED,
-  monitorMs: Number(process.env.ENGINE_MONITOR_MS || 2000), scanMs: Number(process.env.ENGINE_SCAN_MS || 5000)
+  monitorMs: Number(process.env.ENGINE_MONITOR_MS || 2000), scanMs: Number(process.env.ENGINE_SCAN_MS || 6000)
 });
 await loadDb();
 engine.start();

@@ -6,6 +6,7 @@ export const SOL_MINT = 'So11111111111111111111111111111111111111112';
 export const DEXSCREENER = 'https://api.dexscreener.com';
 export const GECKOTERMINAL = 'https://api.geckoterminal.com/api/v2';
 export const JUPITER = process.env.JUPITER_API_URL || 'https://lite-api.jup.ag/swap/v1';
+export const JUPITER_PRICE = process.env.JUPITER_PRICE_URL || 'https://lite-api.jup.ag/price/v3';
 const SEEN_TTL_MS = 30 * 60 * 1000;
 const WATCHLIST_MAX = 120;
 
@@ -70,7 +71,7 @@ export function todayPnl(trades, botId, now = Date.now()) {
 
 export function createEngine({
   db, save, log, connection, marketConnection = connection, getKeypair, liveAllowed,
-  fetchImpl = fetch, monitorMs = 2_000, scanMs = 5_000, paperCostPct = 1,
+  fetchImpl = fetch, monitorMs = 2_000, scanMs = 6_000, paperCostPct = 1,
   clock = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms))
 }) {
   const watch = new Map(); // mint -> first seen time
@@ -93,38 +94,87 @@ export function createEngine({
     if (!res.ok) throw new Error(`${new URL(url).host} responded ${res.status}`);
     return res.json();
   }
-  async function pairsFor(mints) {
+  // DexScreener rate-limits shared hosting IPs hard, so it is optional: after a 429 it is skipped for 2 minutes.
+  let dexCooldownUntil = 0;
+  const dexAvailable = () => clock() >= dexCooldownUntil;
+  async function dexJson(url) {
+    try { return await getJson(url); }
+    catch (e) { if (/ 429/.test(e.message)) dexCooldownUntil = clock() + 120_000; throw e; }
+  }
+  async function dexPairs(mints) {
     const out = new Map();
-    for (let i = 0; i < mints.length; i += 30) {
-      const pairs = await getJson(`${DEXSCREENER}/tokens/v1/solana/${mints.slice(i, i + 30).join(',')}`);
+    for (let i = 0; i < mints.length && dexAvailable(); i += 30) {
+      const pairs = await dexJson(`${DEXSCREENER}/tokens/v1/solana/${mints.slice(i, i + 30).join(',')}`).catch(() => []);
       for (const [mint, pair] of bestSolPairs(pairs)) out.set(mint, pair);
     }
     return out;
   }
-  // New tokens come from three feeds. Each one is watched for SEEN_TTL_MS and re-checked every scan,
+  // Current SOL price of each token. Jupiter's price API is the primary source (fast, generous limits);
+  // DexScreener fills any gaps.
+  async function pricesFor(mints) {
+    const out = new Map();
+    try {
+      for (let i = 0; i < mints.length; i += 49) {
+        const ids = [SOL_MINT, ...mints.slice(i, i + 49)];
+        const data = await getJson(`${JUPITER_PRICE}?ids=${ids.join(',')}`);
+        const solUsd = Number(data?.[SOL_MINT]?.usdPrice);
+        if (!(solUsd > 0)) break;
+        for (const m of ids.slice(1)) { const usd = Number(data?.[m]?.usdPrice); if (usd > 0) out.set(m, usd / solUsd); }
+      }
+    } catch (e) { health.lastError = `Jupiter price: ${e.message}`; }
+    const missing = mints.filter(m => !out.has(m));
+    if (missing.length) for (const [m, pair] of await dexPairs(missing)) out.set(m, Number(pair.priceNative));
+    return out;
+  }
+  // GeckoTerminal pool -> the DexScreener-shaped pair the filters expect.
+  function geckoPair(pool) {
+    const a = pool?.attributes || {};
+    const base = pool?.relationships?.base_token?.data?.id || '';
+    const quote = pool?.relationships?.quote_token?.data?.id || '';
+    if (!base.startsWith('solana_') || quote !== `solana_${SOL_MINT}`) return null;
+    const price = Number(a.base_token_price_native_currency);
+    if (!(price > 0)) return null;
+    const mint = base.slice(7);
+    return {
+      chainId: 'solana', dexId: pool?.relationships?.dex?.data?.id || 'unknown', pairAddress: a.address,
+      url: `https://www.geckoterminal.com/solana/pools/${a.address}`,
+      baseToken: { address: mint, symbol: String(a.name || '').split(' / ')[0] || '?' }, quoteToken: { address: SOL_MINT },
+      priceNative: String(price), liquidity: { usd: Number(a.reserve_in_usd) || 0 },
+      txns: { m5: { buys: a.transactions?.m5?.buys || 0, sells: a.transactions?.m5?.sells || 0 } },
+      pairCreatedAt: Date.parse(a.pool_created_at) || null
+    };
+  }
+  // New launches come from GeckoTerminal's newest pools (pages 1-2), plus DexScreener's latest profiles and
+  // boosts when it isn't rate-limiting. Tokens are watched for SEEN_TTL_MS and re-checked every scan,
   // so a launch that is too quiet at first can still be bought once it picks up.
+  let scanCount = 0;
   async function discover(now) {
     for (const [mint, at] of watch) if (now - at > SEEN_TTL_MS) watch.delete(mint);
-    const feeds = await Promise.allSettled([
-      getJson(`${GECKOTERMINAL}/networks/solana/new_pools?page=1`),
-      getJson(`${DEXSCREENER}/token-profiles/latest/v1`),
-      getJson(`${DEXSCREENER}/token-boosts/latest/v1`)
-    ]);
     const add = mint => { if (mint && !watch.has(mint)) watch.set(mint, now); };
-    if (feeds[0].status === 'fulfilled') {
-      for (const pool of feeds[0].value?.data || []) {
-        const base = pool?.relationships?.base_token?.data?.id || '';
-        const quote = pool?.relationships?.quote_token?.data?.id || '';
-        if (base.startsWith('solana_') && quote === `solana_${SOL_MINT}`) add(base.slice(7));
-      }
+    const pairs = new Map();
+    const pages = scanCount++ % 2 === 0 ? [1, 2] : [1];
+    for (const page of pages) {
+      try {
+        for (const pool of (await getJson(`${GECKOTERMINAL}/networks/solana/new_pools?page=${page}`))?.data || []) {
+          const pair = geckoPair(pool);
+          if (!pair) continue;
+          add(pair.baseToken.address);
+          const cur = pairs.get(pair.baseToken.address);
+          if (!cur || pair.liquidity.usd > cur.liquidity.usd) pairs.set(pair.baseToken.address, pair);
+        }
+      } catch (e) { health.lastError = `GeckoTerminal: ${e.message}`; break; }
     }
-    for (const feed of feeds.slice(1)) {
-      if (feed.status !== 'fulfilled' || !Array.isArray(feed.value)) continue;
-      for (const item of feed.value) if (item?.chainId === 'solana') add(item.tokenAddress);
+    if (dexAvailable()) {
+      const feeds = await Promise.allSettled([dexJson(`${DEXSCREENER}/token-profiles/latest/v1`), dexJson(`${DEXSCREENER}/token-boosts/latest/v1`)]);
+      for (const feed of feeds) if (feed.status === 'fulfilled' && Array.isArray(feed.value)) for (const item of feed.value) if (item?.chainId === 'solana') add(item.tokenAddress);
     }
     while (watch.size > WATCHLIST_MAX) watch.delete(watch.keys().next().value);
     health.watching = watch.size;
-    return watch.size ? pairsFor([...watch.keys()]) : new Map();
+    // Refresh watched tokens that dropped off the GeckoTerminal pages.
+    const stale = [...watch.keys()].filter(m => !pairs.has(m));
+    for (const [m, pair] of await dexPairs(stale)) pairs.set(m, pair);
+    health.dexScreener = dexAvailable() ? 'ok' : 'rate-limited, skipped';
+    return pairs;
   }
   // Reject tokens whose creator can still mint more supply or freeze holders' accounts.
   async function mintIsSafe(mint) {
@@ -272,12 +322,12 @@ export function createEngine({
       // Positions are managed even for paused bots so nothing is left unattended.
       const open = db.positions.filter(p => db.bots.some(b => b.id === p.botId));
       if (open.length) {
-        const prices = await pairsFor([...new Set(open.map(p => p.mint))]);
+        const prices = await pricesFor([...new Set(open.map(p => p.mint))]);
         const exits = [];
         for (const position of open) {
           const bot = db.bots.find(b => b.id === position.botId);
-          const pair = prices.get(position.mint);
-          if (pair) { position.lastPrice = Number(pair.priceNative); position.peakPrice = Math.max(position.peakPrice || position.entryPrice, position.lastPrice); }
+          const price = prices.get(position.mint);
+          if (price > 0) { position.lastPrice = price; position.peakPrice = Math.max(position.peakPrice || position.entryPrice, position.lastPrice); }
           if (position.nextSellAt && now < position.nextSellAt) continue;
           const reason = exitReason(position, bot, position.lastPrice, now);
           if (reason) exits.push(withWallet(bot, () => closePosition(bot, position, reason)).catch(e => sellFailed(bot, position, e, now)));

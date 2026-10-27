@@ -1,6 +1,6 @@
 // Checks every external dependency the bots need, against the real network, without spending SOL.
 import { PublicKey, VersionedTransaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
-import { SOL_MINT, DEXSCREENER, GECKOTERMINAL, JUPITER } from './engine.js';
+import { SOL_MINT, DEXSCREENER, GECKOTERMINAL, JUPITER, JUPITER_PRICE } from './engine.js';
 
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
@@ -21,30 +21,30 @@ export async function runSelfTest({ fetchImpl = fetch, connection, marketConnect
 
   await step('New pools feed (GeckoTerminal)', async () => {
     const pools = (await getJson(`${GECKOTERMINAL}/networks/solana/new_pools?page=1`)).data || [];
-    const sol = pools.filter(p => p?.relationships?.quote_token?.data?.id === `solana_${SOL_MINT}`);
+    const sol = pools.filter(p => p?.relationships?.quote_token?.data?.id === `solana_${SOL_MINT}` && Number(p.attributes?.base_token_price_native_currency) > 0);
+    if (!sol.length) throw new Error(`${pools.length} pools returned, none priced in SOL`);
+    sol.sort((a, b) => Number(b.attributes.reserve_in_usd) - Number(a.attributes.reserve_in_usd));
+    const top = sol[0].attributes;
     ctx.mints = sol.map(p => p.relationships.base_token.data.id.slice(7));
-    if (!ctx.mints.length) throw new Error(`${pools.length} pools returned, none quoted in SOL`);
-    return `${pools.length} new pools, ${sol.length} paired with SOL`;
+    ctx.token = { mint: ctx.mints[0], symbol: String(top.name).split(' / ')[0] };
+    return `${pools.length} new pools, ${sol.length} paired with SOL; e.g. ${ctx.token.symbol}: liquidity $${Math.round(top.reserve_in_usd).toLocaleString()}, ${top.transactions?.m5?.buys ?? 0} buys / ${top.transactions?.m5?.sells ?? 0} sells in 5m`;
   });
-  await step('Token profiles feed (DexScreener)', async () => {
-    const list = await getJson(`${DEXSCREENER}/token-profiles/latest/v1`);
-    return `${list.filter(i => i.chainId === 'solana').length} Solana profiles`;
+  await step('Live prices (Jupiter price API)', async () => {
+    const ids = [SOL_MINT, ...(ctx.mints || []).slice(0, 20)];
+    const data = await getJson(`${JUPITER_PRICE}?ids=${ids.join(',')}`);
+    const solUsd = Number(data?.[SOL_MINT]?.usdPrice);
+    if (!(solUsd > 0)) throw new Error('No SOL price returned');
+    return `SOL $${solUsd.toFixed(2)}; ${ids.slice(1).filter(m => Number(data?.[m]?.usdPrice) > 0).length}/${ids.length - 1} new tokens priced`;
   });
-  await step('Pair prices (DexScreener)', async () => {
-    const mints = (ctx.mints || []).slice(0, 30);
-    if (!mints.length) throw new Error('No mints to price (new pools feed failed)');
-    const pairs = await getJson(`${DEXSCREENER}/tokens/v1/solana/${mints.join(',')}`);
-    const priced = pairs.filter(p => p.quoteToken?.address === SOL_MINT && Number(p.priceNative) > 0);
-    if (!priced.length) throw new Error(`${pairs.length} pairs returned, none priced in SOL`);
-    priced.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
-    ctx.pair = priced[0];
-    return `${priced.length}/${mints.length} priced; e.g. ${ctx.pair.baseToken.symbol} at ${Number(ctx.pair.priceNative).toPrecision(3)} SOL, liquidity $${Math.round(ctx.pair.liquidity?.usd || 0).toLocaleString()}`;
+  await step('DexScreener (optional extra feed)', async () => {
+    try { const list = await getJson(`${DEXSCREENER}/token-profiles/latest/v1`); return `${list.filter(i => i.chainId === 'solana').length} Solana profiles`; }
+    catch (e) { if (/ 429/.test(e.message)) return 'Rate-limited from this server (common on shared hosting). The bots skip it and use GeckoTerminal + Jupiter.'; throw e; }
   });
   await step('Mint safety check (mainnet RPC)', async () => {
-    const mint = ctx.pair?.baseToken?.address || USDC;
+    const mint = ctx.token?.mint || USDC;
     const info = (await marketConnection.getParsedAccountInfo(new PublicKey(mint), 'confirmed')).value?.data?.parsed?.info;
     if (!info) throw new Error(`Could not read mint ${mint}`);
-    return `${ctx.pair?.baseToken?.symbol || 'USDC'}: mint authority ${info.mintAuthority ? 'ACTIVE (would be skipped)' : 'revoked'}, freeze authority ${info.freezeAuthority ? 'ACTIVE (would be skipped)' : 'revoked'}`;
+    return `${ctx.token?.symbol || 'USDC'}: mint authority ${info.mintAuthority ? 'ACTIVE (would be skipped)' : 'revoked'}, freeze authority ${info.freezeAuthority ? 'ACTIVE (would be skipped)' : 'revoked'}`;
   });
   await step('Swap quote SOL → USDC (Jupiter)', async () => {
     const q = await getJson(`${JUPITER}/quote?inputMint=${SOL_MINT}&outputMint=${USDC}&amount=10000000&slippageBps=50`);
@@ -53,10 +53,10 @@ export async function runSelfTest({ fetchImpl = fetch, connection, marketConnect
     return `0.01 SOL → ${(Number(q.outAmount) / 1e6).toFixed(4)} USDC via ${q.routePlan?.length || '?'} hop(s)`;
   });
   await step('Swap quote SOL → new token (Jupiter)', async () => {
-    if (!ctx.pair) throw new Error('No new token to quote');
-    const q = await getJson(`${JUPITER}/quote?inputMint=${SOL_MINT}&outputMint=${ctx.pair.baseToken.address}&amount=10000000&slippageBps=500`);
-    if (!q.outAmount) throw new Error(`No route for ${ctx.pair.baseToken.symbol}`);
-    return `${ctx.pair.baseToken.symbol} is routable, price impact ${(Number(q.priceImpactPct || 0) * 100).toFixed(2)}%`;
+    if (!ctx.token) throw new Error('No new token to quote');
+    const q = await getJson(`${JUPITER}/quote?inputMint=${SOL_MINT}&outputMint=${ctx.token.mint}&amount=10000000&slippageBps=500`);
+    if (!q.outAmount) throw new Error(`No route for ${ctx.token.symbol}`);
+    return `${ctx.token.symbol} is routable, price impact ${(Number(q.priceImpactPct || 0) * 100).toFixed(2)}%`;
   });
   await step('Build + simulate swap transaction (Jupiter → mainnet RPC)', async () => {
     if (!ctx.quote) throw new Error('No quote to build from');
