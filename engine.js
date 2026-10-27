@@ -24,7 +24,7 @@ const PRICE_MS = 3_000; // spot price refresh for open positions
 
 export const STRATEGY_DEFAULTS = {
   mode: 'paper',
-  takeProfitMultiplier: 2,
+  takeProfitMultiplier: 1.5,
   stopLossPercent: 15,
   maxPositionSol: 0.05,
   minLiquidityUsd: 8000,
@@ -555,11 +555,13 @@ export function createEngine({
     if (position.nextSellAt && now < position.nextSellAt) return;
     const timeUp = now - Date.parse(position.openedAt) >= bot.maxHoldMinutes * 60_000;
     const est = estimateMultiple(position);
-    const hint = exitReason(position, bot, est, now) || (partialDue(position, bot, est) ? 'partial' : null);
+    // Within 5% of take profit counts as a hint too, so a fast spike is confirmed and sold without waiting.
+    const hint = exitReason(position, bot, est, now) || (partialDue(position, bot, est) ? 'partial' : null) ||
+      (est >= bot.takeProfitMultiplier * 0.95 ? 'near_target' : null);
     const stale = !position.valueAt || now - position.valueAt >= REVALUE_MS;
     if (!hint && !timeUp && !stale) return;
     if (!position.tokenRaw) {
-      if (hint && hint !== 'partial') await closePosition(bot, position, hint);
+      if (hint && hint !== 'partial' && hint !== 'near_target') await closePosition(bot, position, hint);
       return;
     }
     let quote = null;
