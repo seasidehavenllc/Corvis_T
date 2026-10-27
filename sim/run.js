@@ -10,7 +10,10 @@ export async function simulate({ hours = 3, seed = 42, quiet = false, dexScreene
     const kp = Keypair.generate();
     keys.set(kp.publicKey.toBase58(), kp);
     return { ...STRATEGY_DEFAULTS, id: name, name, mode, enabled: true, walletAddress: kp.publicKey.toBase58(),
-      takeProfitMultiplier: 1.6, stopLossPercent: 20, maxPositionSol: 0.05, ...extra,
+      takeProfitMultiplier: 1.6, stopLossPercent: 20, maxPositionSol: 0.05,
+      // The simulated holder counts are random and not tied to rugs, so the run uses looser holder filters
+      // to get enough trades to check the accounting.
+      minPairAgeMinutes: 0, minHolders: 40, maxTopHoldersPct: 35, maxDevHoldingPct: 10, maxDevLaunches: 20, ...extra,
       stats: { trades: 0, wins: 0, losses: 0, realizedPnlSol: 0, feesSol: 0 } };
   };
   const db = {
