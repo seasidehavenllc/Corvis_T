@@ -12,7 +12,8 @@ function pair(overrides = {}) {
     pairCreatedAt: now - 5 * 60_000, ...overrides
   };
 }
-const bot = { ...STRATEGY_DEFAULTS, id: 'b1', name: 'Test', enabled: true, takeProfitMultiplier: 1.5, stopLossPercent: 20, maxPositionSol: 0.1, stats: { trades: 0, wins: 0, losses: 0, realizedPnlSol: 0, feesSol: 0 } };
+// Most tests buy a one-minute-old coin, so the fixture bot allows that; the defaults wait 5 minutes.
+const bot = { ...STRATEGY_DEFAULTS, minPairAgeMinutes: 0, id: 'b1', name: 'Test', enabled: true, takeProfitMultiplier: 1.5, stopLossPercent: 20, maxPositionSol: 0.1, stats: { trades: 0, wins: 0, losses: 0, realizedPnlSol: 0, feesSol: 0 } };
 
 test('bestSolPairs keeps the most liquid SOL-quoted pair per token', () => {
   const best = bestSolPairs([pair({ liquidity: { usd: 1 } }), pair(), pair({ quoteToken: { address: 'USDC' }, liquidity: { usd: 1e9 } }), pair({ chainId: 'base' })]);
@@ -268,4 +269,14 @@ test('coins left in a wallet after a restart are taken back and sold by the exit
   assert.equal(db.positions[0].tokenRaw, '5000000');
   assert.ok(Math.abs(db.positions[0].sizeSol - 0.02) < 0.001); // valued at what it sells for now
   assert.equal((await engine.adoptHoldings(b, [MINT])).length, 0); // never adopted twice
+});
+
+test('default filters skip brand-new launches, thin pools and pools losing liquidity', () => {
+  const d = { ...STRATEGY_DEFAULTS };
+  const ok = pair({ pairCreatedAt: now - 10 * 60_000, liquidity: { usd: 20000 }, holders: 250, topHoldersPct: 20, devPct: 1 });
+  assert.deepEqual(passesFilters(ok, d, now), []);
+  assert.ok(passesFilters({ ...ok, pairCreatedAt: now - 2 * 60_000 }, d, now).includes('too_new'));
+  assert.ok(passesFilters({ ...ok, liquidity: { usd: 9000 } }, d, now).includes('liquidity'));
+  assert.ok(passesFilters({ ...ok, liquidityChange5m: -25 }, d, now).includes('liquidity_falling'));
+  assert.ok(passesFilters({ ...ok, holders: 60 }, d, now).includes('holders'));
 });
