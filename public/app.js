@@ -105,6 +105,7 @@ function renderBots() {
         <span class="chip">${esc(b.maxPositionSol)} SOL/trade</span><span class="chip">liq ≥ $${Number(b.minLiquidityUsd).toLocaleString()}</span>
         <span class="chip">age ≤ ${esc(b.maxPairAgeMinutes)}m</span><span class="chip">hold ≤ ${esc(b.maxHoldMinutes)}m</span>
         ${b.trailingStopPercent ? `<span class="chip">trail ${esc(b.trailingStopPercent)}%</span>` : ''}
+        ${b.insiderSellPct > 0 || b.maxSingleHolderPct > 0 ? `<span class="chip">rug guard${b.maxSingleHolderPct > 0 ? ` · 1 wallet ≤ ${esc(b.maxSingleHolderPct)}%` : ''}${b.insiderSellPct > 0 ? ` · sell if insiders dump ${esc(b.insiderSellPct)}%` : ''}</span>` : '<span class="chip">rug guard off</span>'}
       </div>
       <div class="bot-actions">
         ${b.enabled ? `<button class="btn btn-stop btn-sm" data-act="pause" data-id="${esc(b.id)}">Pause</button>` : `<button class="btn btn-start btn-sm" data-act="start" data-id="${esc(b.id)}">Start</button>`}
