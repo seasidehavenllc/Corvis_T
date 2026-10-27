@@ -558,7 +558,7 @@ app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: e
 const engine = createEngine({
   db: new Proxy({}, { get: (_t, k) => db[k], set: (_t, k, v) => { db[k] = v; return true; } }),
   save: saveDb, log, connection, marketConnection, getKeypair: botKeypair, liveAllowed: LIVE_TRADING_ENABLED,
-  monitorMs: Number(process.env.ENGINE_MONITOR_MS || 1000),
+  monitorMs: Number(process.env.ENGINE_MONITOR_MS || 400),
   scanMs: Number(process.env.ENGINE_SCAN_MS || (process.env.JUPITER_API_KEY ? 5000 : 6000))
 });
 await loadDb();

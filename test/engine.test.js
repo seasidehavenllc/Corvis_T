@@ -220,3 +220,34 @@ test('copycat tickers and tokens about to leave their bonding curve are skipped'
   assert.deepEqual(passesFilters(pair({ bondingCurvePct: 92 }), bot, now), ['graduating']);
   assert.deepEqual(passesFilters(pair({ bondingCurvePct: 40 }), bot, now), []);
 });
+
+test('pump.fun coins are priced from their bonding curve on chain, so a dump is caught on the next tick', async () => {
+  let t = Date.now(), poolPrice = 0.001;
+  const quote = url => {
+    const u = new URL(url); const amt = Number(u.searchParams.get('amount'));
+    const out = u.searchParams.get('inputMint') === SOL_MINT ? amt / 1e9 / poolPrice * 1e6 : amt / 1e6 * poolPrice * 1e9;
+    return { outAmount: String(Math.floor(out)) };
+  };
+  const fetchImpl = async url => ({ ok: true, json: async () => url.includes('/quote') ? quote(url) : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }] : url.includes('token-boosts') ? [] : [pair({ pairCreatedAt: t - 60_000 })] });
+  const { PublicKey } = await import('@solana/web3.js');
+  const PUMP = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+  const curve = () => {
+    const d = Buffer.alloc(49);
+    const vToken = 1_000_000_000n * 1_000_000n; // 1B tokens, 6 decimals
+    d.writeBigUInt64LE(vToken, 8);
+    d.writeBigUInt64LE(BigInt(Math.round(poolPrice * 1e9 * 1e9)), 16); // SOL reserves (lamports) for that price
+    return { owner: PUMP, data: d };
+  };
+  const connection = {
+    getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null } } } } }),
+    getMultipleAccountsInfo: async keys => keys.map(() => curve())
+  };
+  const db = { bots: [{ ...bot, paperBalanceSol: 1, takeProfitMultiplier: 3, partialSellPercent: 0, stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => t });
+  await engine.tick();
+  assert.equal(db.positions.length, 1);
+  poolPrice = 0.0007; t += 500; // DexScreener still shows the old price
+  await engine.tick();
+  assert.equal(db.trades.length, 1);
+  assert.equal(db.trades[0].reason, 'stop_loss');
+});

@@ -26,6 +26,9 @@ const REVALUE_MIN_MS = 2_000; // ...and up to this often when few positions shar
 // Tokens named after major coins are almost always copycat rugs.
 const IMPOSTOR_SYMBOLS = new Set(['SOL', 'WSOL', 'USDC', 'USDT', 'BTC', 'WBTC', 'ETH', 'WETH', 'JUP', 'BONK', 'WIF', 'TRUMP', 'PYTH', 'RAY', 'JTO']);
 const PRICE_MS = 3_000; // spot price refresh for open positions
+const DEX_PRICE_MS = 1_000; // DexScreener price refresh for open positions
+// pump.fun bonding curves are read straight from the chain every tick, the fastest price there is.
+const PUMP_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 
 export const STRATEGY_DEFAULTS = {
   mode: 'paper',
@@ -213,6 +216,25 @@ export function createEngine({
     for (let i = 0; i < mints.length && available(DEX_HOST); i += 30) {
       const pairs = await feedJson(`${DEXSCREENER}/tokens/v1/solana/${mints.slice(i, i + 30).join(',')}`, 120_000).catch(() => []);
       for (const [mint, pair] of bestSolPairs(pairs)) out.set(mint, pair);
+    }
+    return out;
+  }
+  // SOL price of tokens still on a pump.fun bonding curve, from the curve's reserves at the latest slot.
+  // Mints without a live curve are remembered and skipped.
+  const curves = new Map(); // mint -> curve address, or null when the mint has no live curve
+  async function curvePrices(mints) {
+    const out = new Map();
+    for (const m of mints) if (!curves.has(m)) curves.set(m, PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), new PublicKey(m).toBuffer()], PUMP_PROGRAM)[0]);
+    const live = mints.filter(m => curves.get(m));
+    for (let i = 0; i < live.length; i += 100) {
+      const batch = live.slice(i, i + 100);
+      const infos = await marketConnection.getMultipleAccountsInfo(batch.map(m => curves.get(m)), 'processed');
+      batch.forEach((m, j) => {
+        const d = infos[j]?.data;
+        if (!infos[j]?.owner?.equals?.(PUMP_PROGRAM) || !d || d.length < 49 || d[48] !== 0) { curves.set(m, null); return; }
+        const vToken = Number(d.readBigUInt64LE(8)), vSol = Number(d.readBigUInt64LE(16));
+        if (vToken > 0 && vSol > 0) out.set(m, (vSol / LAMPORTS_PER_SOL) / (vToken / 1e6));
+      });
     }
     return out;
   }
@@ -602,7 +624,7 @@ export function createEngine({
   }
 
   // Fast loop: price every open position and sell the moment an exit rule triggers.
-  let lastPriceAt = 0;
+  let lastPriceAt = 0, lastDexAt = 0, lastSaveAt = 0, dexMiss = new Set();
   async function monitor() {
     if (monitoring) return;
     monitoring = true;
@@ -610,19 +632,32 @@ export function createEngine({
     try {
       // Positions are managed even for paused bots so nothing is left unattended.
       const open = db.positions.filter(p => db.bots.some(b => b.id === p.botId));
+      const tradeCount = db.trades.length;
       if (open.length) {
         // Spot prices every tick from DexScreener, which has its own rate limit and leaves Jupiter's budget
         // for sell quotes. Jupiter's price API takes over while DexScreener is rate-limited.
+        // Tokens on a pump.fun curve are priced from the chain every tick. The rest use DexScreener every
+        // second (its own rate limit, so Jupiter's budget stays for sell quotes), then Jupiter's price API.
         const mints = [...new Set(open.map(p => p.mint))];
-        let prices = null;
-        if (available(DEX_HOST)) prices = new Map([...await dexPairs(mints)].map(([m, pair]) => [m, Number(pair.priceNative)]));
-        if ((!prices || !prices.size) && now - lastPriceAt >= PRICE_MS) { lastPriceAt = now; prices = await pricesFor(mints); }
-        if (prices) for (const position of open) { const price = prices.get(position.mint); if (price > 0) position.lastPrice = price; }
+        const prices = await curvePrices(mints).catch(() => new Map());
+        const rest = mints.filter(m => !prices.has(m));
+        if (rest.length && available(DEX_HOST) && now - lastDexAt >= DEX_PRICE_MS) {
+          lastDexAt = now;
+          for (const [m, pair] of await dexPairs(rest)) prices.set(m, Number(pair.priceNative));
+          dexMiss = new Set(rest.filter(m => !prices.has(m)));
+        }
+        const missing = rest.filter(m => !available(DEX_HOST) || dexMiss.has(m));
+        if (missing.length && now - lastPriceAt >= PRICE_MS) {
+          lastPriceAt = now;
+          for (const [m, price] of await pricesFor(missing)) prices.set(m, price);
+        }
+        for (const position of open) { const price = prices.get(position.mint); if (price > 0) position.lastPrice = price; }
         await Promise.all(open.map(position => {
           const bot = db.bots.find(b => b.id === position.botId);
           return withWallet(bot, () => db.positions.includes(position) && managePosition(bot, position, now)).catch(e => sellFailed(bot, position, e, now));
         }));
-        await save();
+        // Ticks are fast, so state is written at most every 2 s, or straight away when a trade closed.
+        if (db.trades.length !== tradeCount || now - lastSaveAt >= 2_000) { lastSaveAt = now; await save(); }
       }
       for (const bot of db.bots.filter(b => b.enabled)) {
         if (todayPnl(db.trades, bot.id, now) <= -bot.maxDailyLossSol) {
