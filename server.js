@@ -350,7 +350,8 @@ app.patch('/api/bots/:id', requireAdmin, async (req, res) => {
   if (enabled && settings.mode === 'live' && !LIVE_TRADING_ENABLED) return res.status(409).json({ error: 'Live trading is off on this server. It needs SOLANA_NETWORK=mainnet-beta and ENABLE_LIVE_TRADING=true in Render.' });
   if (enabled && settings.mode === 'live' && !(await connection.getBalance(new PublicKey(bot.walletAddress), 'confirmed').catch(() => 0) > settings.maxPositionSol * LAMPORTS_PER_SOL)) return res.status(409).json({ error: `Fund the bot wallet with more than ${settings.maxPositionSol} SOL before starting it live.` });
   Object.assign(bot, settings, { enabled, status: enabled ? `Running · ${settings.mode}` : 'Paused' });
-  await saveDb(); log('info', `${bot.name} ${typeof req.body?.enabled === 'boolean' ? (enabled ? `started (${bot.mode})` : 'paused') : 'settings updated'}.`);
+  await saveDb(); const modeChanged = req.body?.mode && Object.keys(req.body).length === 1;
+  log('info', `${bot.name} ${typeof req.body?.enabled === 'boolean' ? (enabled ? `started (${bot.mode})` : 'paused') : modeChanged ? `switched to ${bot.mode}` : 'settings updated'}.`);
   res.json(publicBot(bot));
 });
 app.post('/api/bots/:id/positions/:pid/close', requireAdmin, async (req, res) => {
