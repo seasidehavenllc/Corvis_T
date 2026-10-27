@@ -185,20 +185,32 @@ export function walletRecord(txs, wallet) {
     const at = (tx.blockTime || 0) * 1000;
     const c = coins.get(mint) || { spent: 0, got: 0, buys: 0, sells: 0, firstBuy: null, lastSell: null };
     if (side === 'buy') { c.buys += 1; c.spent += Math.max(0, -sol); c.firstBuy = Math.min(c.firstBuy ?? at, at); }
+<<<<<<< HEAD
     // Tokens leaving with no SOL coming back were sent to another wallet, not sold: that coin can't be judged.
     else if (sol < 0.001) c.sentAway = true;
     else { c.sells += 1; c.got += sol; c.lastSell = Math.max(c.lastSell ?? at, at); }
+=======
+    else { c.sells += 1; c.got += Math.max(0, sol); c.lastSell = Math.max(c.lastSell ?? at, at); }
+>>>>>>> origin/main
     coins.set(mint, c);
     swaps += 1; first = Math.min(first, at); last = Math.max(last, at);
   }
   // Coins bought over an hour before its latest trade and never sold are usually dead: they count as losses,
   // so a wallet can't look good by simply never selling its losers.
+<<<<<<< HEAD
   const closed = [...coins.values()].filter(c => c.spent > 0 && c.buys && !c.sentAway && (c.sells || c.firstBuy < last - 3_600_000));
+=======
+  const closed = [...coins.values()].filter(c => c.spent > 0 && c.buys && (c.sells || c.firstBuy < last - 3_600_000));
+>>>>>>> origin/main
   const wins = closed.filter(c => c.got > c.spent).length;
   const holds = closed.filter(c => c.firstBuy && c.lastSell).map(c => (c.lastSell - c.firstBuy) / 60_000).sort((a, b) => a - b);
   const hours = Math.max((last - first) / 3_600_000, 1 / 60);
   return {
+<<<<<<< HEAD
     swaps, sentAway: [...coins.values()].filter(c => c.sentAway).length, closed: closed.length, unsold: closed.filter(c => !c.sells).length, wins, winRate: closed.length ? wins / closed.length : null,
+=======
+    swaps, closed: closed.length, unsold: closed.filter(c => !c.sells).length, wins, winRate: closed.length ? wins / closed.length : null,
+>>>>>>> origin/main
     pnlSol: closed.reduce((t, c) => t + c.got - c.spent, 0), spentSol: closed.reduce((t, c) => t + c.spent, 0),
     medianHoldMin: holds.length ? holds[Math.floor(holds.length / 2)] : null,
     swapsPerHour: swaps ? swaps / hours : 0, coversHours: swaps ? (last - first) / 3_600_000 : 0
