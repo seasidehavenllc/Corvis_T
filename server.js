@@ -128,6 +128,18 @@ function newBotRecord(settings, walletIndex) {
 // Rebuild bots for derived wallets that have on-chain history but are missing from the database
 // (for example after Render's free plan restarts with an empty disk). Checks 25 wallets per RPC call and stops at the first empty batch.
 let recovery = { done: false, recovered: 0, error: null };
+// RECOVERED_BOT_SETTINGS (JSON, e.g. {"mode":"live","maxPositionSol":0.01,"maxOpenPositions":20}) is applied to
+// bots rebuilt after a restart, so on the free plan your settings come back instead of the defaults.
+// The bot still starts paused.
+function applyRecoverySettings(bot) {
+  if (!process.env.RECOVERED_BOT_SETTINGS) return;
+  let parsed;
+  try { parsed = JSON.parse(process.env.RECOVERED_BOT_SETTINGS); } catch { return log('warn', 'RECOVERED_BOT_SETTINGS is not valid JSON; using defaults.'); }
+  const v = validateBotSettings({ ...parsed, name: bot.name }, bot);
+  if (v.error) return log('warn', `RECOVERED_BOT_SETTINGS ignored: ${v.error}`);
+  if (v.mode === 'live' && !LIVE_TRADING_ENABLED) v.mode = 'paper';
+  Object.assign(bot, v);
+}
 async function recoverWallets() {
   if (!/^[a-f0-9]{64}$/i.test(ENCRYPTION_KEY)) { recovery = { done: true, recovered: 0, error: null }; return; }
   try {
@@ -137,6 +149,7 @@ async function recoverWallets() {
     for (const w of found) {
       if (db.bots.some(b => b.walletIndex === w.index)) continue;
       const bot = newBotRecord({ name: `Recovered wallet #${w.index + 1}` }, w.index);
+      applyRecoverySettings(bot);
       bot.status = w.tokens ? `Paused · recovered, holds ${w.tokens} token(s)` : 'Paused · recovered';
       db.bots.push(bot);
       recovery.recovered++;

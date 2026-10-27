@@ -370,3 +370,15 @@ test('the bot sells as soon as the biggest wallets start dumping, before the pri
   assert.equal(db.positions.length, 0);
   assert.equal(db.trades[0].reason, 'rug_warning');
 });
+
+test('old coins from the top organic list do not crowd new launches out of the watchlist', async () => {
+  const t = Date.now();
+  const old = Array.from({ length: 100 }, (_, i) => ({ id: `Old${i}`.padEnd(32, '1'), symbol: `O${i}`, usdPrice: 1, liquidity: 1e6, firstPool: { id: `p${i}`, createdAt: new Date(t - 400 * 86400_000).toISOString() } }));
+  const fresh = { id: MINT, symbol: 'NEW', usdPrice: 0.15, liquidity: 20000, firstPool: { id: 'pn', createdAt: new Date(t - 10 * 60_000).toISOString() } };
+  const fetchImpl = async url => ({ ok: true, json: async () => url.includes('/price/v3') ? { [SOL_MINT]: { usdPrice: 150 } }
+    : url.includes('toporganicscore') ? [...old, fresh] : url.includes('/quote') ? { outAmount: '0' } : [] });
+  const db = { bots: [{ ...bot, paperBalanceSol: 1, stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection: {}, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => t });
+  await engine.scan();
+  assert.equal(engine.health.watching, 1);
+});
