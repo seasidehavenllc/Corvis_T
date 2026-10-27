@@ -3,8 +3,8 @@ import { Keypair } from '@solana/web3.js';
 import { createEngine, STRATEGY_DEFAULTS } from '../engine.js';
 import { createMarket } from './market.js';
 
-export async function simulate({ hours = 3, seed = 42, quiet = false, dexScreenerDown = false } = {}) {
-  const market = createMarket({ seed, dexScreenerDown });
+export async function simulate({ hours = 3, seed = 42, quiet = false, dexScreenerDown = false, down = [] } = {}) {
+  const market = createMarket({ seed, dexScreenerDown, down });
   const keys = new Map();
   const mkBot = (name, mode, extra = {}) => {
     const kp = Keypair.generate();

@@ -7,11 +7,15 @@ export const DEXSCREENER = 'https://api.dexscreener.com';
 export const GECKOTERMINAL = 'https://api.geckoterminal.com/api/v2';
 export const JUPITER = process.env.JUPITER_API_URL || 'https://lite-api.jup.ag/swap/v1';
 export const JUPITER_PRICE = process.env.JUPITER_PRICE_URL || 'https://lite-api.jup.ag/price/v3';
+export const JUPITER_TOKENS = process.env.JUPITER_TOKENS_URL || 'https://lite-api.jup.ag/tokens/v2';
 const SEEN_TTL_MS = 30 * 60 * 1000;
 const WATCHLIST_MAX = 120;
 
 export const STRATEGY_DEFAULTS = {
   mode: 'paper',
+  takeProfitMultiplier: 1.45,
+  stopLossPercent: 15,
+  maxPositionSol: 0.05,
   minLiquidityUsd: 5000,
   maxPairAgeMinutes: 30,
   minBuys5m: 10,
@@ -94,37 +98,54 @@ export function createEngine({
     if (!res.ok) throw new Error(`${new URL(url).host} responded ${res.status}`);
     return res.json();
   }
-  // DexScreener rate-limits shared hosting IPs hard, so it is optional: after a 429 it is skipped for 2 minutes.
-  let dexCooldownUntil = 0;
-  const dexAvailable = () => clock() >= dexCooldownUntil;
-  async function dexJson(url) {
+  // Free market-data APIs rate-limit shared hosting IPs (Render included). A source that answers 429 is
+  // skipped for a while instead of failing the scan, and the other sources carry on.
+  const cooldown = new Map(); // host -> until
+  const available = host => clock() >= (cooldown.get(host) || 0);
+  async function feedJson(url, ms = 60_000) {
+    const host = new URL(url).host;
+    if (!available(host)) throw new Error(`${host} cooling down after a rate limit`);
     try { return await getJson(url); }
-    catch (e) { if (/ 429/.test(e.message)) dexCooldownUntil = clock() + 120_000; throw e; }
+    catch (e) { if (/ 429/.test(e.message)) cooldown.set(host, clock() + ms); throw e; }
   }
+  const DEX_HOST = new URL(DEXSCREENER).host;
   async function dexPairs(mints) {
     const out = new Map();
-    for (let i = 0; i < mints.length && dexAvailable(); i += 30) {
-      const pairs = await dexJson(`${DEXSCREENER}/tokens/v1/solana/${mints.slice(i, i + 30).join(',')}`).catch(() => []);
+    for (let i = 0; i < mints.length && available(DEX_HOST); i += 30) {
+      const pairs = await feedJson(`${DEXSCREENER}/tokens/v1/solana/${mints.slice(i, i + 30).join(',')}`, 120_000).catch(() => []);
       for (const [mint, pair] of bestSolPairs(pairs)) out.set(mint, pair);
     }
     return out;
   }
-  // Current SOL price of each token. Jupiter's price API is the primary source (fast, generous limits);
-  // DexScreener fills any gaps.
+  let solUsd = null;
+  // Current SOL price of each token, from Jupiter's price API, with DexScreener filling any gaps.
   async function pricesFor(mints) {
     const out = new Map();
     try {
       for (let i = 0; i < mints.length; i += 49) {
         const ids = [SOL_MINT, ...mints.slice(i, i + 49)];
-        const data = await getJson(`${JUPITER_PRICE}?ids=${ids.join(',')}`);
-        const solUsd = Number(data?.[SOL_MINT]?.usdPrice);
-        if (!(solUsd > 0)) break;
-        for (const m of ids.slice(1)) { const usd = Number(data?.[m]?.usdPrice); if (usd > 0) out.set(m, usd / solUsd); }
+        const data = await feedJson(`${JUPITER_PRICE}?ids=${ids.join(',')}`, 10_000);
+        const sol = Number(data?.[SOL_MINT]?.usdPrice);
+        if (!(sol > 0)) break;
+        solUsd = sol;
+        for (const m of ids.slice(1)) { const usd = Number(data?.[m]?.usdPrice); if (usd > 0) out.set(m, usd / sol); }
       }
     } catch (e) { health.lastError = `Jupiter price: ${e.message}`; }
     const missing = mints.filter(m => !out.has(m));
     if (missing.length) for (const [m, pair] of await dexPairs(missing)) out.set(m, Number(pair.priceNative));
     return out;
+  }
+  // Jupiter token (from /tokens/v2) -> the DexScreener-shaped pair the filters expect.
+  function jupiterPair(t) {
+    const price = Number(t?.usdPrice) / solUsd;
+    if (!t?.id || !(price > 0)) return null;
+    return {
+      chainId: 'solana', dexId: t.firstPool?.id ? 'jupiter' : 'unknown', pairAddress: t.firstPool?.id,
+      url: `https://jup.ag/tokens/${t.id}`, baseToken: { address: t.id, symbol: t.symbol || '?' }, quoteToken: { address: SOL_MINT },
+      priceNative: String(price), liquidity: { usd: Number(t.liquidity) || 0 },
+      txns: { m5: { buys: t.stats5m?.numBuys || 0, sells: t.stats5m?.numSells || 0 } },
+      pairCreatedAt: Date.parse(t.firstPool?.createdAt) || null
+    };
   }
   // GeckoTerminal pool -> the DexScreener-shaped pair the filters expect.
   function geckoPair(pool) {
@@ -144,36 +165,46 @@ export function createEngine({
       pairCreatedAt: Date.parse(a.pool_created_at) || null
     };
   }
-  // New launches come from GeckoTerminal's newest pools (pages 1-2), plus DexScreener's latest profiles and
-  // boosts when it isn't rate-limiting. Tokens are watched for SEEN_TTL_MS and re-checked every scan,
-  // so a launch that is too quiet at first can still be bought once it picks up.
-  let scanCount = 0;
+  // New launches come from Jupiter's recent-tokens list, GeckoTerminal's newest pools and DexScreener's
+  // latest profiles and boosts, whichever are answering. Tokens are watched for SEEN_TTL_MS and re-checked
+  // every scan, so a launch that is too quiet at first can still be bought once it picks up.
   async function discover(now) {
     for (const [mint, at] of watch) if (now - at > SEEN_TTL_MS) watch.delete(mint);
     const add = mint => { if (mint && !watch.has(mint)) watch.set(mint, now); };
     const pairs = new Map();
-    const pages = scanCount++ % 2 === 0 ? [1, 2] : [1];
-    for (const page of pages) {
-      try {
-        for (const pool of (await getJson(`${GECKOTERMINAL}/networks/solana/new_pools?page=${page}`))?.data || []) {
-          const pair = geckoPair(pool);
-          if (!pair) continue;
-          add(pair.baseToken.address);
-          const cur = pairs.get(pair.baseToken.address);
-          if (!cur || pair.liquidity.usd > cur.liquidity.usd) pairs.set(pair.baseToken.address, pair);
-        }
-      } catch (e) { health.lastError = `GeckoTerminal: ${e.message}`; break; }
+    const keep = pair => {
+      if (!pair) return;
+      add(pair.baseToken.address);
+      const cur = pairs.get(pair.baseToken.address);
+      if (!cur || pair.liquidity.usd > cur.liquidity.usd) pairs.set(pair.baseToken.address, pair);
+    };
+    const sources = {};
+    if (!solUsd) await pricesFor([]);
+    if (solUsd) {
+      try { for (const t of await feedJson(`${JUPITER_TOKENS}/recent`, 30_000) || []) keep(jupiterPair(t)); sources.jupiter = 'ok'; }
+      catch (e) { sources.jupiter = e.message; }
     }
-    if (dexAvailable()) {
-      const feeds = await Promise.allSettled([dexJson(`${DEXSCREENER}/token-profiles/latest/v1`), dexJson(`${DEXSCREENER}/token-boosts/latest/v1`)]);
+    try { for (const pool of (await feedJson(`${GECKOTERMINAL}/networks/solana/new_pools?page=1`, 90_000))?.data || []) keep(geckoPair(pool)); sources.geckoterminal = 'ok'; }
+    catch (e) { sources.geckoterminal = e.message; }
+    if (available(DEX_HOST)) {
+      const feeds = await Promise.allSettled([feedJson(`${DEXSCREENER}/token-profiles/latest/v1`, 120_000), feedJson(`${DEXSCREENER}/token-boosts/latest/v1`, 120_000)]);
       for (const feed of feeds) if (feed.status === 'fulfilled' && Array.isArray(feed.value)) for (const item of feed.value) if (item?.chainId === 'solana') add(item.tokenAddress);
-    }
+      sources.dexscreener = feeds.some(f => f.status === 'fulfilled') ? 'ok' : feeds[0].reason?.message;
+    } else sources.dexscreener = 'cooling down after a rate limit';
     while (watch.size > WATCHLIST_MAX) watch.delete(watch.keys().next().value);
     health.watching = watch.size;
-    // Refresh watched tokens that dropped off the GeckoTerminal pages.
-    const stale = [...watch.keys()].filter(m => !pairs.has(m));
+    // Refresh watched tokens that weren't in this scan's feeds: Jupiter token search first, then DexScreener.
+    let stale = [...watch.keys()].filter(m => !pairs.has(m));
+    if (stale.length && solUsd) {
+      for (let i = 0; i < stale.length; i += 100) {
+        try { for (const t of await feedJson(`${JUPITER_TOKENS}/search?query=${stale.slice(i, i + 100).join(',')}`, 30_000) || []) { const p = jupiterPair(t); if (p) pairs.set(p.baseToken.address, p); } }
+        catch { break; }
+      }
+      stale = stale.filter(m => !pairs.has(m));
+    }
     for (const [m, pair] of await dexPairs(stale)) pairs.set(m, pair);
-    health.dexScreener = dexAvailable() ? 'ok' : 'rate-limited, skipped';
+    health.sources = sources;
+    if (!Object.values(sources).includes('ok')) health.lastError = `No market feed answered: ${JSON.stringify(sources)}`;
     return pairs;
   }
   // Reject tokens whose creator can still mint more supply or freeze holders' accounts.
@@ -237,6 +268,7 @@ export function createEngine({
 
   async function openPosition(bot, pair) {
     const price = Number(pair.priceNative);
+    if (!(price > 0) || !(bot.maxPositionSol > 0)) return null;
     const position = {
       id: randomUUID(), botId: bot.id, mode: bot.mode, mint: pair.baseToken.address,
       symbol: pair.baseToken.symbol || '?', pairUrl: pair.url || null, entryPrice: price,

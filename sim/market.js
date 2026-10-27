@@ -16,7 +16,8 @@ function rng(seed) {
   return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 2 ** 32; };
 }
 
-export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:00Z'), launchEveryMs = 90_000, dexScreenerDown = false } = {}) {
+export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:00Z'), launchEveryMs = 90_000, dexScreenerDown = false, down = [] } = {}) {
+  const downHosts = new Set([...down, ...(dexScreenerDown ? ['api.dexscreener.com'] : [])]);
   const rand = rng(seed);
   const state = { now: start, tokens: new Map(), wallets: new Map(), pending: new Map(), sent: new Map(), nextLaunch: start, stats: { swaps: 0, closes: 0, quotes: 0 } };
   const gauss = () => Math.sqrt(-2 * Math.log(rand() || 1e-9)) * Math.cos(2 * Math.PI * rand());
@@ -92,13 +93,18 @@ export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:0
         relationships: { base_token: { data: { id: `solana_${t.mint}` } }, quote_token: { data: { id: `solana_${SOL_MINT}` } }, dex: { data: { id: 'raydium' } } }
       })) });
     }
+    if (u.pathname.startsWith('/tokens/v2/')) {
+      const jup = t => ({ id: t.mint, symbol: t.symbol, usdPrice: t.price * 150, liquidity: t.liquidityUsd, stats5m: { numBuys: t.buys5m, numSells: t.sells5m }, firstPool: { id: `pool_${t.mint}`, createdAt: new Date(t.createdAt).toISOString() } });
+      if (u.pathname.endsWith('/recent')) return ok([...state.tokens.values()].filter(t => state.now - t.createdAt < 10 * 60_000).sort((a, b) => b.createdAt - a.createdAt).slice(0, 30).map(jup));
+      return ok(u.searchParams.get('query').split(',').map(m => state.tokens.get(m)).filter(Boolean).map(jup));
+    }
     if (u.pathname.startsWith('/price/v3')) {
       const SOL_USD = 150;
       const out = { [SOL_MINT]: { usdPrice: SOL_USD } };
       for (const id of u.searchParams.get('ids').split(',')) { const t = state.tokens.get(id); if (t) out[id] = { usdPrice: t.price * SOL_USD }; }
       return ok(out);
     }
-    if (dexScreenerDown && u.host === 'api.dexscreener.com') return { ok: false, status: 429, json: async () => ({}) };
+    if (downHosts.has(u.host)) return { ok: false, status: 429, json: async () => ({}) };
     if (u.pathname.startsWith('/token-profiles') || u.pathname.startsWith('/token-boosts')) return ok([]);
     if (u.pathname.startsWith('/tokens/v1/solana/')) {
       const mints = u.pathname.split('/').pop().split(',');

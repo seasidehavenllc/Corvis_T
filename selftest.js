@@ -1,6 +1,6 @@
 // Checks every external dependency the bots need, against the real network, without spending SOL.
 import { PublicKey, VersionedTransaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
-import { SOL_MINT, DEXSCREENER, GECKOTERMINAL, JUPITER, JUPITER_PRICE } from './engine.js';
+import { SOL_MINT, DEXSCREENER, GECKOTERMINAL, JUPITER, JUPITER_PRICE, JUPITER_TOKENS } from './engine.js';
 
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
@@ -19,15 +19,22 @@ export async function runSelfTest({ fetchImpl = fetch, connection, marketConnect
     return JSON.parse(text);
   }
 
-  await step('New pools feed (GeckoTerminal)', async () => {
-    const pools = (await getJson(`${GECKOTERMINAL}/networks/solana/new_pools?page=1`)).data || [];
-    const sol = pools.filter(p => p?.relationships?.quote_token?.data?.id === `solana_${SOL_MINT}` && Number(p.attributes?.base_token_price_native_currency) > 0);
-    if (!sol.length) throw new Error(`${pools.length} pools returned, none priced in SOL`);
-    sol.sort((a, b) => Number(b.attributes.reserve_in_usd) - Number(a.attributes.reserve_in_usd));
-    const top = sol[0].attributes;
-    ctx.mints = sol.map(p => p.relationships.base_token.data.id.slice(7));
-    ctx.token = { mint: ctx.mints[0], symbol: String(top.name).split(' / ')[0] };
-    return `${pools.length} new pools, ${sol.length} paired with SOL; e.g. ${ctx.token.symbol}: liquidity $${Math.round(top.reserve_in_usd).toLocaleString()}, ${top.transactions?.m5?.buys ?? 0} buys / ${top.transactions?.m5?.sells ?? 0} sells in 5m`;
+  await step('New tokens feed (Jupiter)', async () => {
+    const list = await getJson(`${JUPITER_TOKENS}/recent`);
+    if (!Array.isArray(list) || !list.length) throw new Error('No recent tokens returned');
+    const fresh = list.filter(t => t.id && Number(t.usdPrice) > 0);
+    fresh.sort((a, b) => (Number(b.liquidity) || 0) - (Number(a.liquidity) || 0));
+    const t = fresh[0];
+    ctx.mints = fresh.map(x => x.id);
+    ctx.token = { mint: t.id, symbol: t.symbol };
+    const age = t.firstPool?.createdAt ? Math.round((Date.now() - Date.parse(t.firstPool.createdAt)) / 60000) : '?';
+    return `${list.length} recent tokens; e.g. ${t.symbol}: liquidity $${Math.round(t.liquidity || 0).toLocaleString()}, ${t.stats5m?.numBuys ?? '?'} buys / ${t.stats5m?.numSells ?? '?'} sells in 5m, pool ${age} min old`;
+  });
+  await step('New pools feed (GeckoTerminal, optional)', async () => {
+    try {
+      const pools = (await getJson(`${GECKOTERMINAL}/networks/solana/new_pools?page=1`)).data || [];
+      return `${pools.filter(p => p?.relationships?.quote_token?.data?.id === `solana_${SOL_MINT}`).length}/${pools.length} new pools paired with SOL`;
+    } catch (e) { if (/ 429/.test(e.message)) return 'Rate-limited from this server right now. The bots skip it and use the other feeds.'; throw e; }
   });
   await step('Live prices (Jupiter price API)', async () => {
     const ids = [SOL_MINT, ...(ctx.mints || []).slice(0, 20)];

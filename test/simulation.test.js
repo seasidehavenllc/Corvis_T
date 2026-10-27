@@ -2,9 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { simulate } from '../sim/run.js';
 
-for (const [seed, dexScreenerDown] of [[1, false], [2, false], [3, true]]) {
-  test(`simulated market run (seed ${seed}${dexScreenerDown ? ', DexScreener rate-limited' : ''}): live accounting reconciles and safety holds`, async () => {
-    const { report, summary, errors } = await simulate({ hours: 1.5, seed, quiet: true, dexScreenerDown });
+const cases = [
+  [1, [], 'all feeds up'],
+  [2, ['api.dexscreener.com'], 'DexScreener rate-limited'],
+  [3, ['api.dexscreener.com', 'api.geckoterminal.com'], 'only Jupiter answering'],
+  [4, ['api.geckoterminal.com'], 'GeckoTerminal rate-limited']
+];
+for (const [seed, down, label] of cases) {
+  test(`simulated market run (seed ${seed}, ${label}): live accounting reconciles and safety holds`, async () => {
+    const { report, summary, errors } = await simulate({ hours: 1.5, seed, quiet: true, down });
     assert.equal(summary.openPositions, 0, 'every position is closed after wind-down');
     for (const r of report) {
       assert.ok(r.trades > 0, `${r.bot} traded`);
