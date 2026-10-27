@@ -80,7 +80,11 @@ function renderBots() {
     return `<div class="bot">
       <div class="bot-head">
         <div><div class="bot-name">${esc(b.name)}</div><div class="addr mono">${esc(short(b.walletAddress))} <button class="btn btn-ghost btn-sm" data-copy="${esc(b.walletAddress)}" title="Copy wallet address">Copy</button></div></div>
-        <div class="stack" style="align-items:flex-end;gap:4px"><span class="pill ${statusCls}">${esc(b.status)}</span><span class="pill">${esc(b.mode)}</span></div>
+        <div class="stack" style="align-items:flex-end;gap:4px"><span class="pill ${statusCls}">${esc(b.status)}</span>
+          <div class="mode-switch" role="group" aria-label="Trading mode">
+            <button type="button" class="${b.mode === 'paper' ? 'on' : ''}" data-act="mode" data-mode="paper" data-id="${esc(b.id)}" aria-pressed="${b.mode === 'paper'}">Paper</button>
+            <button type="button" class="${b.mode === 'live' ? 'on live' : ''}" data-act="mode" data-mode="live" data-id="${esc(b.id)}" aria-pressed="${b.mode === 'live'}" ${state.config.liveTradingEnabled ? '' : 'disabled title="Live trading is off on this server"'}>Live</button>
+          </div></div>
       </div>
       <div>
         <div class="muted small">${b.mode === 'paper' ? 'Paper balance' : 'Wallet balance'}</div>
@@ -208,6 +212,13 @@ document.addEventListener('click', async e => {
     if (act.dataset.act === 'details') return openDetails(bot.id);
     if (act.dataset.act === 'edit') return openBotForm(bot);
     if (!requireUnlock()) return;
+    if (act.dataset.act === 'mode') {
+      const mode = act.dataset.mode;
+      if (mode === bot.mode) return;
+      if (mode === 'live' && !confirm(`Switch ${bot.name} to LIVE? ${bot.enabled ? 'It is running, so its next buys' : 'Once started, its buys'} spend real SOL from its wallet, up to ${bot.maxPositionSol} SOL per trade.`)) return;
+      await api(`/api/bots/${encodeURIComponent(bot.id)}`, { method: 'PATCH', body: JSON.stringify({ mode }) });
+      toast(`${bot.name} is now ${mode === 'live' ? 'LIVE' : 'paper'}${bot.openPositions ? '. Open positions finish in the mode they were opened in.' : '.'}`);
+    }
     if (act.dataset.act === 'start') {
       if (bot.mode === 'live' && !confirm(`Start ${bot.name} LIVE? It will spend real SOL from its wallet, up to ${bot.maxPositionSol} SOL per trade.`)) return;
       await api(`/api/bots/${encodeURIComponent(bot.id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: true }) }); toast(`${bot.name} started`);
