@@ -22,7 +22,7 @@ const SEEN_TTL_MS = 30 * 60 * 1000;
 const WATCHLIST_MAX = 120;
 const REVALUE_MS = 15_000; // re-quote each open position at least this often
 const GRADUATION_PCT = 80; // skip launchpad tokens this far along their bonding curve
-const REVALUE_MIN_MS = 3_000; // ...and up to this often when few positions share the Jupiter budget
+const REVALUE_MIN_MS = 2_000; // ...and up to this often when few positions share the Jupiter budget
 // Tokens named after major coins are almost always copycat rugs.
 const IMPOSTOR_SYMBOLS = new Set(['SOL', 'WSOL', 'USDC', 'USDT', 'BTC', 'WBTC', 'ETH', 'WETH', 'JUP', 'BONK', 'WIF', 'TRUMP', 'PYTH', 'RAY', 'JTO']);
 const PRICE_MS = 3_000; // spot price refresh for open positions
@@ -575,7 +575,9 @@ export function createEngine({
     const hint = exitReason(position, bot, est, now) || (partialDue(position, bot, est) ? 'partial' : null) ||
       (est >= bot.takeProfitMultiplier * 0.95 ? 'near_target' : null);
     // Re-quote as often as the budget allows: about 40% of Jupiter requests go to checking open positions.
-    const revalueMs = Math.min(REVALUE_MS, Math.max(REVALUE_MIN_MS, db.positions.length * 60_000 / (jupiterRpm * 0.4)));
+    // When no bot is looking for a buy, the scan needs no quotes and checks get the whole background share.
+    const buying = db.bots.some(b => b.enabled && db.positions.filter(p => p.botId === b.id).length < b.maxOpenPositions);
+    const revalueMs = Math.min(REVALUE_MS, Math.max(REVALUE_MIN_MS, db.positions.length * 60_000 / (jupiterRpm * (buying ? 0.4 : 0.6))));
     const stale = !position.valueAt || now - position.valueAt >= revalueMs;
     if (!hint && !timeUp && !stale) return;
     if (!position.tokenRaw) {
@@ -609,11 +611,13 @@ export function createEngine({
       // Positions are managed even for paused bots so nothing is left unattended.
       const open = db.positions.filter(p => db.bots.some(b => b.id === p.botId));
       if (open.length) {
-        if (now - lastPriceAt >= PRICE_MS) {
-          lastPriceAt = now;
-          const prices = await pricesFor([...new Set(open.map(p => p.mint))]);
-          for (const position of open) { const price = prices.get(position.mint); if (price > 0) position.lastPrice = price; }
-        }
+        // Spot prices every tick from DexScreener, which has its own rate limit and leaves Jupiter's budget
+        // for sell quotes. Jupiter's price API takes over while DexScreener is rate-limited.
+        const mints = [...new Set(open.map(p => p.mint))];
+        let prices = null;
+        if (available(DEX_HOST)) prices = new Map([...await dexPairs(mints)].map(([m, pair]) => [m, Number(pair.priceNative)]));
+        if ((!prices || !prices.size) && now - lastPriceAt >= PRICE_MS) { lastPriceAt = now; prices = await pricesFor(mints); }
+        if (prices) for (const position of open) { const price = prices.get(position.mint); if (price > 0) position.lastPrice = price; }
         await Promise.all(open.map(position => {
           const bot = db.bots.find(b => b.id === position.botId);
           return withWallet(bot, () => db.positions.includes(position) && managePosition(bot, position, now)).catch(e => sellFailed(bot, position, e, now));
