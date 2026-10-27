@@ -138,6 +138,43 @@ export function walletTrades(tx, wallet) {
   return [...delta].filter(([, d]) => d !== 0n).map(([mint, d]) => ({ mint, side: d > 0n ? 'buy' : 'sell' }));
 }
 
+// A wallet's trading record from its recent parsed transactions (newest first or any order), for deciding
+// whether it is worth copying. Each swap is matched to the one coin it traded; SOL and wrapped SOL moved
+// by the wallet in that transaction is what it paid or got back. Coins bought and sold count as closed.
+export function walletRecord(txs, wallet) {
+  const coins = new Map();
+  let swaps = 0, first = Infinity, last = 0;
+  for (const tx of txs) {
+    const trades = walletTrades(tx, wallet);
+    if (trades.length !== 1) continue;
+    const keys = tx.transaction?.message?.accountKeys || [];
+    const i = keys.findIndex(k => String(k.pubkey ?? k) === wallet);
+    let sol = i >= 0 ? (tx.meta.postBalances[i] - tx.meta.preBalances[i]) / 1e9 : 0;
+    for (const [list, sign] of [[tx.meta.preTokenBalances, -1], [tx.meta.postTokenBalances, 1]]) {
+      for (const b of list || []) if (b.owner === wallet && b.mint === SOL_MINT) sol += sign * Number(b.uiTokenAmount?.amount || 0) / 1e9;
+    }
+    const { mint, side } = trades[0];
+    const at = (tx.blockTime || 0) * 1000;
+    const c = coins.get(mint) || { spent: 0, got: 0, buys: 0, sells: 0, firstBuy: null, lastSell: null };
+    if (side === 'buy') { c.buys += 1; c.spent += Math.max(0, -sol); c.firstBuy = Math.min(c.firstBuy ?? at, at); }
+    else { c.sells += 1; c.got += Math.max(0, sol); c.lastSell = Math.max(c.lastSell ?? at, at); }
+    coins.set(mint, c);
+    swaps += 1; first = Math.min(first, at); last = Math.max(last, at);
+  }
+  // Coins bought over an hour before its latest trade and never sold are usually dead: they count as losses,
+  // so a wallet can't look good by simply never selling its losers.
+  const closed = [...coins.values()].filter(c => c.spent > 0 && c.buys && (c.sells || c.firstBuy < last - 3_600_000));
+  const wins = closed.filter(c => c.got > c.spent).length;
+  const holds = closed.filter(c => c.firstBuy && c.lastSell).map(c => (c.lastSell - c.firstBuy) / 60_000).sort((a, b) => a - b);
+  const hours = Math.max((last - first) / 3_600_000, 1 / 60);
+  return {
+    swaps, closed: closed.length, unsold: closed.filter(c => !c.sells).length, wins, winRate: closed.length ? wins / closed.length : null,
+    pnlSol: closed.reduce((t, c) => t + c.got - c.spent, 0), spentSol: closed.reduce((t, c) => t + c.spent, 0),
+    medianHoldMin: holds.length ? holds[Math.floor(holds.length / 2)] : null,
+    swapsPerHour: swaps ? swaps / hours : 0, coversHours: swaps ? (last - first) / 3_600_000 : 0
+  };
+}
+
 // Holders worth watching for a rug: real wallets, biggest first. Pools, launchpad curves and lockers are
 // owned by program addresses (off the ed25519 curve), so only on-curve owners count. `accounts` is
 // [{ account, owner, amount }] in raw token units.

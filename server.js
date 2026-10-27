@@ -1,6 +1,6 @@
 import express from 'express';
 import { calculateDevFeeLamports } from './policy.js';
-import { createEngine, STRATEGY_DEFAULTS, MAX_FOLLOWED, tradeJournal } from './engine.js';
+import { createEngine, STRATEGY_DEFAULTS, MAX_FOLLOWED, tradeJournal, walletRecord } from './engine.js';
 import { deriveBotKeypair as deriveFromKey, scanDerivedWallets } from './wallets.js';
 import { runSelfTest } from './selftest.js';
 import path from 'node:path';
@@ -582,6 +582,27 @@ app.post('/api/restore', requireAdmin, express.json({ limit: '20mb' }), async (r
   db.nextWalletIndex = Math.max(incoming.nextWalletIndex || 0, nextWalletIndex());
   await saveDb(); log('info', `Backup restored: ${db.bots.length} bots, ${db.trades.length} trades.`);
   res.json({ ok: true, bots: db.bots.length, trades: db.trades.length });
+});
+// A wallet's recent trading record, to judge whether it is worth copying. Reads its last 100 transactions
+// from the market RPC a few at a time, and keeps the answer for 10 minutes.
+const walletRecords = new Map();
+app.get('/api/wallets/:address/record', requireAdmin, async (req, res) => {
+  let owner;
+  try { owner = new PublicKey(req.params.address); } catch { return res.status(400).json({ error: 'Not a Solana wallet address.' }); }
+  const address = owner.toBase58();
+  const cached = walletRecords.get(address);
+  if (cached && Date.now() - cached.at < 10 * 60_000) return res.json(cached.record);
+  try {
+    const sigs = (await marketConnection.getSignaturesForAddress(owner, { limit: 100 }, 'confirmed')).filter(s => !s.err);
+    const txs = [];
+    for (let i = 0; i < sigs.length; i += 4) {
+      txs.push(...await Promise.all(sigs.slice(i, i + 4).map(s => marketConnection.getParsedTransaction(s.signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }).catch(() => null))));
+    }
+    const record = { address, ...walletRecord(txs.filter(Boolean), address) };
+    walletRecords.set(address, { at: Date.now(), record });
+    log('info', `Wallet check ${address}: ${JSON.stringify(record)}`);
+    res.json(record);
+  } catch (e) { res.status(502).json({ error: `Unable to read this wallet: ${e.message}` }); }
 });
 app.get('/api/journal', (req, res) => {
   const trades = req.query.bot ? db.trades.filter(t => t.botId === req.query.bot) : db.trades;

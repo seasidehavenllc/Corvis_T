@@ -450,3 +450,23 @@ test('copy trading: buys what a followed wallet buys and sells when it sells', a
   assert.equal(db.trades[0].reason, 'leader_sold');
   assert.equal(db.trades[0].features.copied, true);
 });
+
+import { walletRecord } from '../engine.js';
+test('a wallet\'s record counts finished trades, and old coins it never sold as losses', () => {
+  const w = wallet(), A = 'A'.repeat(43) + '1', B = 'B'.repeat(43) + '1', C = 'C'.repeat(43) + '1';
+  const swap = (mint, tokensBefore, tokensAfter, solBefore, solAfter, minute) => ({
+    blockTime: now / 1000 + minute * 60,
+    transaction: { message: { accountKeys: [{ pubkey: w }] } },
+    meta: { err: null, preBalances: [solBefore * 1e9], postBalances: [solAfter * 1e9],
+      preTokenBalances: [tokenBal(w, mint, tokensBefore)], postTokenBalances: [tokenBal(w, mint, tokensAfter)] }
+  });
+  const r = walletRecord([
+    swap(A, 0, 100, 10, 9, 0), swap(A, 100, 0, 9, 10.5, 5),     // A: +0.5 SOL
+    swap(B, 0, 100, 10.5, 9.5, 10), swap(B, 100, 0, 9.5, 9.8, 12), // B: -0.7 SOL
+    swap(C, 0, 100, 9.8, 9.3, 20), swap(MINT, 0, 100, 9.3, 9.2, 200) // C never sold for 3 hours: a loss; MINT just bought
+  ], w);
+  assert.equal(r.closed, 3);
+  assert.equal(r.unsold, 1);
+  assert.equal(r.wins, 1);
+  assert.ok(Math.abs(r.pnlSol - (0.5 - 0.7 - 0.5)) < 1e-9);
+});
