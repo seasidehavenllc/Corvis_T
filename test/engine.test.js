@@ -214,3 +214,9 @@ test('a token whose pool is drained is flagged as unsellable instead of showing 
   assert.match(db.positions[0].sellError, /no(body| Jupiter route)/i);
   assert.equal(db.positions[0].sellFailures, 1);
 });
+
+test('copycat tickers and tokens about to leave their bonding curve are skipped', () => {
+  assert.deepEqual(passesFilters(pair({ baseToken: { address: MINT, symbol: 'sol' } }), bot, now), ['impostor']);
+  assert.deepEqual(passesFilters(pair({ bondingCurvePct: 92 }), bot, now), ['graduating']);
+  assert.deepEqual(passesFilters(pair({ bondingCurvePct: 40 }), bot, now), []);
+});

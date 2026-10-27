@@ -17,10 +17,14 @@ export const JUPITER_RPM = Number(process.env.JUPITER_RPM || (JUP_KEY ? 60 : 50)
 const TX_FEE_SOL = 0.000005;
 const LOCKED_FLOOR = 1.02; // whole-trade multiple kept once the first target is banked
 const NO_ROUTE = 'No Jupiter route for this token: nobody can buy it right now (its pool is drained or moving). The bot keeps retrying.';
-const AUDIT_KEYS = ['holders', 'topHoldersPct', 'devPct', 'devMints', 'isSus', 'organicScore', 'traders5m', 'organicBuyers5m'];
+const AUDIT_KEYS = ['holders', 'topHoldersPct', 'devPct', 'devMints', 'isSus', 'organicScore', 'traders5m', 'organicBuyers5m', 'bondingCurvePct'];
 const SEEN_TTL_MS = 30 * 60 * 1000;
 const WATCHLIST_MAX = 120;
 const REVALUE_MS = 15_000; // re-quote each open position at least this often
+const GRADUATION_PCT = 80; // skip launchpad tokens this far along their bonding curve
+const REVALUE_MIN_MS = 3_000; // ...and up to this often when few positions share the Jupiter budget
+// Tokens named after major coins are almost always copycat rugs.
+const IMPOSTOR_SYMBOLS = new Set(['SOL', 'WSOL', 'USDC', 'USDT', 'BTC', 'WBTC', 'ETH', 'WETH', 'JUP', 'BONK', 'WIF', 'TRUMP', 'PYTH', 'RAY', 'JTO']);
 const PRICE_MS = 3_000; // spot price refresh for open positions
 
 export const STRATEGY_DEFAULTS = {
@@ -68,6 +72,7 @@ export function bestSolPairs(pairs) {
 
 export function passesFilters(pair, bot, now = Date.now()) {
   const reasons = [];
+  if (IMPOSTOR_SYMBOLS.has(String(pair.baseToken?.symbol || '').trim().toUpperCase())) reasons.push('impostor');
   const buys = pair.txns?.m5?.buys || 0;
   const sells = pair.txns?.m5?.sells || 0;
   if ((pair.liquidity?.usd || 0) < bot.minLiquidityUsd) reasons.push('liquidity');
@@ -75,6 +80,9 @@ export function passesFilters(pair, bot, now = Date.now()) {
   if (bot.minPairAgeMinutes > 0 && pair.pairCreatedAt && now - pair.pairCreatedAt < bot.minPairAgeMinutes * 60_000) reasons.push('too_new');
   // Rug signals from Jupiter's token audit (skipped when a feed doesn't report them).
   if (pair.isSus) reasons.push('flagged');
+  // A launchpad token about to finish its bonding curve moves to a new pool, and for a while nothing can
+  // sell it. Buying just before that is how a position ends up stuck with no route.
+  if (pair.bondingCurvePct != null && pair.bondingCurvePct >= GRADUATION_PCT) reasons.push('graduating');
   if (bot.maxDevHoldingPct > 0 && pair.devPct != null && pair.devPct > bot.maxDevHoldingPct) reasons.push('dev_holding');
   if (bot.maxDevLaunches > 0 && pair.devMints != null && pair.devMints > bot.maxDevLaunches) reasons.push('serial_launcher');
   if (bot.minOrganicScore > 0 && pair.organicScore != null && pair.organicScore < bot.minOrganicScore) reasons.push('organic');
@@ -240,7 +248,8 @@ export function createEngine({
       pairCreatedAt: Date.parse(t.firstPool?.createdAt) || null,
       holders: num(t.holderCount), topHoldersPct: num(t.audit?.topHoldersPercentage),
       devPct: num(t.audit?.devBalancePercentage), devMints: num(t.audit?.devMints), isSus: t.audit?.isSus === true,
-      organicScore: num(t.organicScore), traders5m: num(t.stats5m?.numTraders), organicBuyers5m: num(t.stats5m?.numOrganicBuyers)
+      organicScore: num(t.organicScore), traders5m: num(t.stats5m?.numTraders), organicBuyers5m: num(t.stats5m?.numOrganicBuyers),
+      bondingCurvePct: t.graduatedPool ? null : num(t.bondingCurve)
     };
   }
   // GeckoTerminal pool -> the DexScreener-shaped pair the filters expect.
@@ -565,7 +574,9 @@ export function createEngine({
     // Within 5% of take profit counts as a hint too, so a fast spike is confirmed and sold without waiting.
     const hint = exitReason(position, bot, est, now) || (partialDue(position, bot, est) ? 'partial' : null) ||
       (est >= bot.takeProfitMultiplier * 0.95 ? 'near_target' : null);
-    const stale = !position.valueAt || now - position.valueAt >= REVALUE_MS;
+    // Re-quote as often as the budget allows: about 40% of Jupiter requests go to checking open positions.
+    const revalueMs = Math.min(REVALUE_MS, Math.max(REVALUE_MIN_MS, db.positions.length * 60_000 / (jupiterRpm * 0.4)));
+    const stale = !position.valueAt || now - position.valueAt >= revalueMs;
     if (!hint && !timeUp && !stale) return;
     if (!position.tokenRaw) {
       if (hint && hint !== 'partial' && hint !== 'near_target') await closePosition(bot, position, hint);
