@@ -118,6 +118,7 @@ function renderBots() {
         ${b.openPositions ? `<button class="btn btn-stop btn-sm" data-act="sellall" data-id="${esc(b.id)}">Pause &amp; sell all</button>` : ''}
         <button class="btn btn-sm" data-act="details" data-id="${esc(b.id)}">Stats &amp; wallet</button>
         <button class="btn btn-sm" data-act="withdraw" data-id="${esc(b.id)}">Withdraw</button>
+        <button class="btn btn-sm" data-act="cleanup" data-id="${esc(b.id)}" title="Sell or burn leftover coins in this bot's wallet and get the account deposits back">Recover SOL</button>
         <button class="btn btn-sm" data-act="edit" data-id="${esc(b.id)}">Edit</button>
         <button class="btn btn-danger btn-sm" data-act="delete" data-id="${esc(b.id)}">Delete</button>
       </div>
@@ -311,6 +312,16 @@ document.addEventListener('click', async e => {
       await api(`/api/bots/${encodeURIComponent(bot.id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: true }) }); toast(`${bot.name} started`);
     }
     if (act.dataset.act === 'pause') { await api(`/api/bots/${encodeURIComponent(bot.id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: false }) }); toast(`${bot.name} paused: no new buys. Its open positions still sell on their exit rules; use Pause & sell all to exit now.`); }
+    if (act.dataset.act === 'cleanup') {
+      if (!confirm(`Recover SOL from ${bot.name}'s wallet?\n\nCoins that still have buyers are sold. Coins nobody can buy are burned (they're worthless) and their ~0.002 SOL deposits come back. Open positions are not touched.`)) return;
+      act.disabled = true;
+      toast('Cleaning up the wallet… this can take a minute.');
+      try {
+        const r = await post(`/api/bots/${encodeURIComponent(bot.id)}/cleanup`, {});
+        toast(`${bot.name}: sold ${r.sold.length}, burned ${r.burned.length} dead coin(s), closed ${r.closed} account(s). ${r.recoveredSol >= 0 ? '+' : ''}${r.recoveredSol.toFixed(4)} SOL back in the wallet.`);
+      } finally { act.disabled = false; }
+      return refresh();
+    }
     if (act.dataset.act === 'sellall') {
       if (!confirm(`Pause ${bot.name} and sell all ${bot.openPositions} open position(s) at market now?`)) return;
       act.disabled = true;

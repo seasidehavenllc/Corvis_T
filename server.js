@@ -411,6 +411,12 @@ app.post('/api/bots/:id/sell-all', requireAdmin, async (req, res) => {
   const failed = results.filter(r => r.status === 'rejected').map(r => r.reason?.message);
   res.json({ ok: !failed.length, sold: results.length - failed.length, failed });
 });
+app.post('/api/bots/:id/cleanup', requireAdmin, async (req, res) => {
+  const bot = db.bots.find(b => b.id === req.params.id);
+  if (!bot) return res.status(404).json({ error: 'Bot not found.' });
+  try { res.json(await engine.cleanupWallet(bot)); }
+  catch (e) { log('error', `${bot.name}: wallet clean-up failed: ${e.message}`); res.status(502).json({ error: e.message }); }
+});
 app.post('/api/bots/:id/withdraw', requireAdmin, async (req, res) => {
   try {
     const bot = db.bots.find(b => b.id === req.params.id);
