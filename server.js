@@ -319,8 +319,9 @@ function validateBotSettings(body, current = {}) {
   }
   const followOnly = Boolean(body?.followOnly ?? current.followOnly ?? false);
   const autoFollow = Boolean(body?.autoFollow ?? current.autoFollow ?? false);
+  const requireHolderData = Boolean(body?.requireHolderData ?? current.requireHolderData ?? STRATEGY_DEFAULTS.requireHolderData);
   if (followOnly && !followWallets.length && !autoFollow) return { error: 'Add at least one wallet to follow or turn on auto-find, or turn off "only buy what they buy".' };
-  return { name, takeProfitMultiplier, stopLossPercent, stopLossFollowsPrice, maxPositionSol, mode, ...strategy, followWallets, followOnly, autoFollow };
+  return { name, takeProfitMultiplier, stopLossPercent, stopLossFollowsPrice, maxPositionSol, mode, ...strategy, requireHolderData, followWallets, followOnly, autoFollow };
 }
 
 app.get('/health', (_req, res) => res.json({ ok: true }));

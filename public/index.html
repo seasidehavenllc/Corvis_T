@@ -134,7 +134,8 @@
     <label>Min organic score (0–100, 0 = off) <input id="fOrganic" type="number" min="0" max="100" step="any" value="0" required></label>
     <label>Max pool $ per holder (0 = off) <input id="fLiqHolder" type="number" min="0" step="any" value="150" required></label>
     <label>Max held by one wallet (%, 0 = off) <input id="fWhale" type="number" min="0" max="100" step="any" value="10" required></label>
-    <label>Rug warning: sell when top wallets dump (% of supply, 0 = off) <input id="fInsider" type="number" min="0" max="100" step="any" value="2" required></label>
+    <label>Rug warning: sell when top wallets dump (% of supply, 0 = off) <input id="fInsider" type="number" min="0" max="100" step="any" value="5" required></label>
+    <label class="check"><input id="fNeedHolders" type="checkbox" checked> Skip coins whose holder count can't be checked (every one-tick wipeout so far was one)</label>
     <h4>Copy trading</h4>
     <label>Wallets to follow (one per line, up to 10) <textarea id="fFollow" rows="3" spellcheck="false" autocapitalize="off" placeholder="Paste Solana wallet addresses of traders with a good record"></textarea></label>
     <button type="button" class="btn btn-sm" id="checkFollow">Check these wallets</button>
