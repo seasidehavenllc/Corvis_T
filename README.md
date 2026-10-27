@@ -1,29 +1,68 @@
-# Corvis Trading — dev-wallet transfer policy build
+# Corvis Trading
 
-This is a complete runnable Express dashboard/backend foundation. It is **not a fully working live token-sniping bot**: a vetted token-discovery + swap execution adapter and trusted realized-P&L integration are not present, so automated live trading remains disabled.
+A Solana sniper bot dashboard. Each bot has its own encrypted wallet, scans newly listed tokens, filters out unsafe ones, buys, and exits on take profit, stop loss or a time limit. Bots run in **paper** mode (simulated trades on live market prices) or **live** mode (real swaps through Jupiter).
 
-## Destination and policy
-- The configured dev wallet is `8ooeEAN637seumjXGMed7KXGv9fQBDoniDgtEBsYpbku`.
-- The profit fee is 10% of **positive realized profit only**, not 10% of trade notional and not 10% of returned principal.
-- The per-trade fee is paid in SOL. If a swap produces profit in another token, production settlement code must first calculate realized profit in a trusted common denomination and convert/route the fee appropriately. This build deliberately does not guess token prices.
-- An explicit bot stop/delete sweep can transfer remaining SOL and standard SPL token balances to the dev wallet when `ENABLE_LIVE_SWEEP=true`.
-- Both transfer mechanisms are disabled by default. The dashboard and API expose the configured destination, but do not initiate live transfers unless the environment flags are deliberately enabled.
+## How a bot trades
+The engine runs two loops:
+- **Every 2 s (`ENGINE_MONITOR_MS`)** it reprices every open position, including those of paused bots, and sells on take profit (×), stop loss (%), trailing stop (% off the peak, which arms once the position is up by that much) or max hold time. A bot whose realized loss today reaches `maxDailyLossSol` is stopped.
+- **Every 6 s (`ENGINE_SCAN_MS`)** it refreshes a watchlist of up to 120 new tokens from GeckoTerminal's newest pools, plus DexScreener's latest profiles and boosts when DexScreener isn't rate-limiting (it often blocks shared hosting IPs, so it's optional). Prices for open positions come from Jupiter's price API. Every watched token is re-checked on each scan, so a launch that starts quiet can still be bought once it picks up. Newest launches are checked first.
 
-## Install/run
-1. Use Node.js 20 or newer.
-2. `npm install`
-3. Copy `.env.example` to `.env` locally or enter values in your hosting provider's environment settings.
-4. Set `WALLET_ENCRYPTION_KEY` to 64 hex characters (`openssl rand -hex 32`) and `ADMIN_API_TOKEN` to a long random secret.
-5. Start on devnet: `SOLANA_NETWORK=devnet`, `SOLANA_RPC_URL=https://api.devnet.solana.com`, then `npm start`.
-6. Run `npm test` and `npm run check`.
+A token is bought only if it passes the bot's filters: minimum USD liquidity, maximum pair age, minimum buys in the last 5 minutes, and a buy/sell ratio (momentum). Its **mint and freeze authority must also both be revoked**. A bot never buys the same token twice.
 
-Never commit `.env`, private keys, or admin tokens. The JSON database is ephemeral on some hosts unless persistent storage is configured; back it up securely. Losing the encryption key can make bot wallets unrecoverable.
+- **Paper:** simulated at the DexScreener price with a 1% cost on each side, against the bot's 1 SOL paper balance.
+- **Live:** quoted and swapped through Jupiter with a `veryHigh` priority fee (capped per bot) and dynamic slippage. Transactions skip preflight and are rebroadcast every 2 s until confirmed or expired. Entry price is the price actually paid. P&L comes from the wallet's real SOL change, and emptied token accounts are closed so their ~0.002 SOL rent comes back. One bot's swaps never overlap. A position that fails to sell 5 times in a row (usually a rug with no liquidity left) is booked as a total loss, and its tokens stay in the wallet.
 
-## Transfer API
-- `GET /api/config` shows transfer policy and destination (never secrets).
-- `POST /api/bots/:id/realized-profit-fee` requires admin bearer token and `{ "realizedProfitSol": 0.1, "confirm": true }`. It transfers 10% of that positive SOL profit to the dev wallet only if `ENABLE_DEV_FEE_TRANSFERS=true`. **Only trusted server-side swap settlement code should call this endpoint**; do not expose it to untrusted clients as a way to report arbitrary profits.
-- `POST /api/bots/:id/sweep` requires admin bearer token and `{ "confirm": true }`. When `ENABLE_LIVE_SWEEP=true`, transfers the bot wallet's SOL (minus a fee reserve) and standard SPL token balances to the dev wallet. It does not close positions or sell tokens; it transfers holdings as-is.
-- `DELETE /api/bots/:id` never silently sweeps. A separate explicit sweep call is required first.
+## Testing it
+- `npm test` runs unit tests plus three simulated market sessions. Each checks that live P&L matches the wallet balance exactly, that no token with an active mint authority is ever bought, and that every position gets closed.
+- `npm run simulate [hours] [seed]` runs a synthetic memecoin market through the real engine, live code path included, and prints each bot's results. The market model is a test harness, not a profit forecast.
+- **System check** in the dashboard (or `SELFTEST_ON_BOOT=true`, which logs `SELFTEST` lines) hits the real feeds, Jupiter and the RPC. It builds a real swap transaction and simulates it on mainnet without spending anything.
+- **Test live swap** in a bot's *Stats & wallet* panel appears when live trading is on. It does a real 0.01 SOL → USDC → SOL round trip with the bot's wallet and reports the timings and cost.
 
-## Live trading status
-`/api/status` reports `liveTradingEnabled: false`. This is intentional. Transfer plumbing is not a swap/trading engine; enabling automatic buys/sells without a vetted execution adapter, risk limits, token checks, idempotency, and devnet tests could lose funds. Do not set the dashboard to claim live trading works until that integration exists and is verified.
+## Speed and rate limits (read before going live)
+Free market-data APIs rate-limit shared hosting like Render. Testing on Render showed HTTP 429s from DexScreener, GeckoTerminal, Jupiter's free tier and the public Solana RPC. The engine copes: each feed cools down after a 429 and the others carry on, and Jupiter calls run on a budget that always keeps 40% for real quotes and swaps. For fast, reliable live trading, add two free keys:
+- **`JUPITER_API_KEY`** from portal.jup.ag. It switches to `api.jup.ag` with higher limits and tightens the loops to 1 s for positions and 3 s for scans.
+- **A private RPC** for `SOLANA_RPC_URL` (and `MARKET_RPC_URL`), for example Helius's free plan. The public RPC rate-limits quickly.
+
+This is a fast polling sniper: it typically buys within seconds to a minute of a pool appearing in the feeds. It does not compete for the first block of a launch, which needs paid streaming (Yellowstone gRPC) and Jito bundles.
+
+## Keeping your money safe
+- **Wallets can't be lost:** every bot wallet is derived from `WALLET_ENCRYPTION_KEY` plus a wallet number. If the database is wiped (Render's free plan does this whenever it sleeps or redeploys), the server checks the blockchain on startup and re-adds every bot wallet that still holds SOL or tokens, as "Recovered wallet #N". Back up `WALLET_ENCRYPTION_KEY`: it is the master key for all bot wallets.
+- **History:** trade history and bot settings live in `DATA_DIR`. On the free plan they reset when the instance sleeps, so use **Download backup** in the dashboard and **Restore** after a restart. A paid plan with a disk at `DATA_DIR` keeps them automatically.
+- **Withdraw any time:** *Stats & wallet → Move funds out* sends SOL to your own wallet.
+- **Export key:** *Stats & wallet → Export private key* gives a base58 key you can import into Phantom or Solflare.
+- **Delete is blocked** while a wallet holds SOL or tokens, or has open positions.
+- **Live trading needs two switches:** `ENABLE_LIVE_TRADING=true` and `SOLANA_NETWORK=mainnet-beta`. Each bot must also be set to live mode and funded. Start small.
+
+## Render setup
+Works on the **free plan**. The bots only run while the server is awake, and an open dashboard keeps it awake because it polls every 10 seconds. A free instance sleeps about 15 minutes after you close the tab, and the bots stop until you open it again. Positions left open while it sleeps are managed again when it wakes.
+1. Set `WALLET_ENCRYPTION_KEY` to the output of `openssl rand -hex 32` and save a copy somewhere safe.
+2. Set `ADMIN_API_TOKEN` to a long random password. You use it to unlock the dashboard.
+3. Optional: `NODE_VERSION=22`, `SOLANA_NETWORK=devnet`, `SOLANA_RPC_URL=https://api.devnet.solana.com`.
+4. Deploy, open the site, unlock, create a bot, and press **Start**. It runs in paper mode.
+5. To go live: set `SOLANA_NETWORK=mainnet-beta`, set `SOLANA_RPC_URL` to a paid RPC (Helius, QuickNode or Triton), and set `ENABLE_LIVE_TRADING=true`. Then edit a bot to live mode, send SOL to its wallet address, and start it.
+6. Optional, for history that survives restarts: switch to a paid plan, add a disk at `/var/data`, and set `DATA_DIR=/var/data`.
+
+## Local run
+Node 20+. `npm install`, copy `.env.example` to `.env`, fill in the keys, then run `npm start`, `npm test` and `npm run check`.
+
+## API (admin calls need `Authorization: Bearer <ADMIN_API_TOKEN>`)
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/overview` | Bots with balances and performance, totals, open positions, recent trades, engine health |
+| GET | `/api/backup` | Download settings and trade history (admin) |
+| POST | `/api/restore` | Restore a backup file (admin) |
+| GET | `/api/bots/:id/stats` | One bot's full stats, positions and trade history |
+| POST | `/api/bots` | Create a bot (admin) |
+| PATCH | `/api/bots/:id` | Edit settings, or `{ "enabled": true/false }` to start or pause (admin) |
+| POST | `/api/bots/:id/positions/:pid/close` | Sell a position now (admin) |
+| POST | `/api/bots/:id/withdraw` | `{ to, amountSol \| all: true, confirm: true }` (admin) |
+| POST | `/api/bots/:id/export-key` | `{ confirm: true }` returns the base58 private key (admin) |
+| DELETE | `/api/bots/:id` | Only when the wallet is empty (admin) |
+| POST | `/api/wallet/withdraw` | Treasury withdrawal (admin) |
+
+### Dev wallet fee and sweep (off by default)
+- `POST /api/bots/:id/realized-profit-fee` with `{ "realizedProfitSol": 0.1, "settlementId": "<unique trade id>", "confirm": true }` sends `DEV_FEE_PERCENT`% of positive profit to `DEV_WALLET_ADDRESS`, but only if `ENABLE_DEV_FEE_TRANSFERS=true`. A repeated `settlementId` is rejected, so the same profit is never charged twice. The engine does not call this automatically.
+- `POST /api/bots/:id/sweep` with `{ "confirm": true }` sends the bot wallet's SOL and SPL tokens to the dev wallet, but only if `ENABLE_LIVE_SWEEP=true`.
+
+## Risks
+New Solana tokens are extremely volatile, and many are scams. The safety checks block the common mint and freeze traps, but they can't stop liquidity pulls, honeypot taxes or sudden dumps. Paper-trade first, keep position sizes small, and only fund bots with money you can afford to lose.

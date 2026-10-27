@@ -1,9 +1,7 @@
-# Venue adapter plan
+# Venue adapters
 
-This starter deliberately includes no live trading implementation.
+Jupiter is implemented in `engine.js` (quote → swap → sign → confirm). Possible next adapters:
 
-Recommended integration order:
-1. **Jupiter Swap API** for supported routed swaps on Solana. Review current API docs, key/rate limits, transaction signing, slippage, and execution requirements. Verify whether the exact token/market is routable before placing any order.
 2. **Raydium** adapter using its supported SDK/API for supported pools.
 3. **Orca** adapter using its supported SDK/API for supported Whirlpool pools.
 4. **pump.fun** launch/curve monitoring and execution as a separate adapter. Do not assume Jupiter's ordinary swap endpoint supports every bonding-curve launch or every migration state. Confirm current supported integration and platform terms before implementing.
