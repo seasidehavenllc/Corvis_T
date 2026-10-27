@@ -272,9 +272,10 @@ function validateBotSettings(body, current = {}) {
     trailingStopPercent: pick('trailingStopPercent'), priorityFeeSol: pick('priorityFeeSol'), maxPriceImpactPct: pick('maxPriceImpactPct'),
     maxRoundTripPct: pick('maxRoundTripPct'), minHolders: pick('minHolders'), maxTopHoldersPct: pick('maxTopHoldersPct'),
     maxDevHoldingPct: pick('maxDevHoldingPct'), maxDevLaunches: pick('maxDevLaunches'), minOrganicScore: pick('minOrganicScore'),
-    minPairAgeMinutes: pick('minPairAgeMinutes'), partialTakeProfitMultiplier: pick('partialTakeProfitMultiplier'), partialSellPercent: pick('partialSellPercent')
+    minPairAgeMinutes: pick('minPairAgeMinutes'), partialTakeProfitMultiplier: pick('partialTakeProfitMultiplier'), partialSellPercent: pick('partialSellPercent'),
+    maxSingleHolderPct: pick('maxSingleHolderPct'), insiderSellPct: pick('insiderSellPct')
   };
-  for (const [k, label] of [['maxDevHoldingPct', 'Dev holding limit'], ['minOrganicScore', 'Minimum organic score'], ['partialSellPercent', 'Partial sell']]) {
+  for (const [k, label] of [['maxDevHoldingPct', 'Dev holding limit'], ['minOrganicScore', 'Minimum organic score'], ['partialSellPercent', 'Partial sell'], ['maxSingleHolderPct', 'One-wallet limit'], ['insiderSellPct', 'Rug warning']]) {
     if (!(strategy[k] >= 0 && strategy[k] <= 100)) return { error: `${label} must be 0 (off) to 100.` };
   }
   if (!(Number.isInteger(strategy.maxDevLaunches) && strategy.maxDevLaunches >= 0)) return { error: 'Dev launches limit must be a whole number, 0 (off) or more.' };
