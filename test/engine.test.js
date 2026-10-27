@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bestSolPairs, passesFilters, exitReason, todayPnl, createEngine, STRATEGY_DEFAULTS, SOL_MINT } from '../engine.js';
+import { bestSolPairs, passesFilters, exitReason, todayPnl, tradeJournal, createEngine, STRATEGY_DEFAULTS, SOL_MINT } from '../engine.js';
 
 const now = Date.parse('2026-10-27T12:00:00Z');
 const MINT = 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263';
@@ -135,4 +135,54 @@ test('an armed trailing stop never lets a winner turn into a loss', () => {
   const pos = { openedAt: new Date(now - 60_000).toISOString(), peakMultiple: 1.21 };
   assert.equal(exitReason(pos, b, 1.05, now), null);
   assert.equal(exitReason(pos, b, 0.99, now), 'trailing_stop');
+});
+
+test('rug filters reject dev-heavy, serial-launcher and flagged tokens', () => {
+  const b = { ...bot, maxDevHoldingPct: 10, maxDevLaunches: 20, minHolders: 0, maxTopHoldersPct: 0 };
+  const fresh = pair({ pairCreatedAt: now - 60_000 });
+  assert.deepEqual(passesFilters({ ...fresh, devPct: 3, devMints: 2 }, b, now), []);
+  assert.ok(passesFilters({ ...fresh, devPct: 25 }, b, now).includes('dev_holding'));
+  assert.ok(passesFilters({ ...fresh, devMints: 300 }, b, now).includes('serial_launcher'));
+  assert.ok(passesFilters({ ...fresh, isSus: true }, b, now).includes('flagged'));
+  assert.ok(passesFilters(fresh, { ...b, minPairAgeMinutes: 5 }, now).includes('too_new'));
+});
+
+test('scaling out banks part at the first target and the rest cannot turn into a loss', async () => {
+  let poolPrice = 0.001;
+  const quote = url => {
+    const u = new URL(url); const amt = Number(u.searchParams.get('amount'));
+    const out = u.searchParams.get('inputMint') === SOL_MINT ? amt / 1e9 / poolPrice * 1e6 : amt / 1e6 * poolPrice * 1e9;
+    return { outAmount: String(Math.floor(out)) };
+  };
+  const fetchImpl = async url => ({
+    ok: true,
+    json: async () => url.includes('/quote') ? quote(url) : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }]
+      : url.includes('token-boosts') ? [] : [pair({ priceNative: String(poolPrice), pairCreatedAt: Date.now() - 60_000 })]
+  });
+  const connection = { getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null } } } } }) };
+  const b = { ...bot, paperBalanceSol: 1, takeProfitMultiplier: 3, partialTakeProfitMultiplier: 1.3, partialSellPercent: 50, trailingStopPercent: 0, stats: { ...bot.stats } };
+  const db = { bots: [b], trades: [], positions: [] };
+  let t = Date.now();
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => t });
+  await engine.tick();
+  assert.equal(db.positions.length, 1);
+  poolPrice = 0.0015; t += 20_000;
+  await engine.monitor();
+  assert.equal(db.positions.length, 1);
+  assert.ok(db.positions[0].partialDone && db.positions[0].realizedSol > 0.07, 'half was sold at about 1.5x');
+  poolPrice = 0.0005; t += 20_000; // the rest crashes 66%
+  await engine.monitor();
+  assert.equal(db.trades.length, 1);
+  assert.equal(db.trades[0].reason, 'protect_profit');
+  assert.ok(Math.abs(b.paperBalanceSol - (1 + db.trades[0].pnlSol)) < 1e-9, 'paper balance matches booked P&L');
+});
+
+test('trade journal groups closed trades by entry signal', () => {
+  const trades = [
+    { pnlSol: 0.02, features: { devPct: 0.5 } }, { pnlSol: -0.05, features: { devPct: 12 } }, { pnlSol: 0.01, features: { devPct: 0.2 } }
+  ];
+  const dev = tradeJournal(trades).find(s => s.key === 'devPct');
+  assert.equal(dev.ranges[0].trades, 2);
+  assert.equal(dev.ranges[0].winRate, 1);
+  assert.equal(dev.ranges[3].trades, 1);
 });

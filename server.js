@@ -1,6 +1,6 @@
 import express from 'express';
 import { calculateDevFeeLamports } from './policy.js';
-import { createEngine, STRATEGY_DEFAULTS } from './engine.js';
+import { createEngine, STRATEGY_DEFAULTS, tradeJournal } from './engine.js';
 import { deriveBotKeypair as deriveFromKey, scanDerivedWallets } from './wallets.js';
 import { runSelfTest } from './selftest.js';
 import path from 'node:path';
@@ -243,8 +243,16 @@ function validateBotSettings(body, current = {}) {
     maxOpenPositions: pick('maxOpenPositions'), maxHoldMinutes: pick('maxHoldMinutes'), slippageBps: pick('slippageBps'),
     maxDailyLossSol: pick('maxDailyLossSol'), minBuySellRatio: pick('minBuySellRatio'),
     trailingStopPercent: pick('trailingStopPercent'), priorityFeeSol: pick('priorityFeeSol'), maxPriceImpactPct: pick('maxPriceImpactPct'),
-    maxRoundTripPct: pick('maxRoundTripPct'), minHolders: pick('minHolders'), maxTopHoldersPct: pick('maxTopHoldersPct')
+    maxRoundTripPct: pick('maxRoundTripPct'), minHolders: pick('minHolders'), maxTopHoldersPct: pick('maxTopHoldersPct'),
+    maxDevHoldingPct: pick('maxDevHoldingPct'), maxDevLaunches: pick('maxDevLaunches'), minOrganicScore: pick('minOrganicScore'),
+    minPairAgeMinutes: pick('minPairAgeMinutes'), partialTakeProfitMultiplier: pick('partialTakeProfitMultiplier'), partialSellPercent: pick('partialSellPercent')
   };
+  for (const [k, label] of [['maxDevHoldingPct', 'Dev holding limit'], ['minOrganicScore', 'Minimum organic score'], ['partialSellPercent', 'Partial sell']]) {
+    if (!(strategy[k] >= 0 && strategy[k] <= 100)) return { error: `${label} must be 0 (off) to 100.` };
+  }
+  if (!(Number.isInteger(strategy.maxDevLaunches) && strategy.maxDevLaunches >= 0)) return { error: 'Dev launches limit must be a whole number, 0 (off) or more.' };
+  if (!(strategy.minPairAgeMinutes >= 0 && strategy.minPairAgeMinutes < strategy.maxPairAgeMinutes)) return { error: 'Minimum pair age must be 0 or more and below the maximum age.' };
+  if (strategy.partialSellPercent > 0 && !(strategy.partialTakeProfitMultiplier > 1 && strategy.partialTakeProfitMultiplier < takeProfitMultiplier)) return { error: 'The first target must be above 1× and below the final take profit.' };
   if (!(strategy.maxRoundTripPct >= 0 && strategy.maxRoundTripPct <= 100)) return { error: 'Max round-trip cost must be 0 (off) to 100%.' };
   if (!(Number.isInteger(strategy.minHolders) && strategy.minHolders >= 0)) return { error: 'Minimum holders must be a whole number, 0 or more.' };
   if (!(strategy.maxTopHoldersPct >= 0 && strategy.maxTopHoldersPct <= 100)) return { error: 'Top holders limit must be 0 (off) to 100%.' };
@@ -520,6 +528,10 @@ app.post('/api/restore', requireAdmin, express.json({ limit: '20mb' }), async (r
   db.nextWalletIndex = Math.max(incoming.nextWalletIndex || 0, nextWalletIndex());
   await saveDb(); log('info', `Backup restored: ${db.bots.length} bots, ${db.trades.length} trades.`);
   res.json({ ok: true, bots: db.bots.length, trades: db.trades.length });
+});
+app.get('/api/journal', (req, res) => {
+  const trades = req.query.bot ? db.trades.filter(t => t.botId === req.query.bot) : db.trades;
+  res.json({ trades: trades.filter(t => t.features).length, signals: tradeJournal(trades) });
 });
 app.get('/api/withdrawals', (_req, res) => res.json(db.withdrawals.slice(-50).reverse()));
 app.get('/api/dev-fees', (_req, res) => res.json(db.devFees.slice(-50).reverse()));
