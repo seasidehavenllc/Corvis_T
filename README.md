@@ -15,20 +15,21 @@ Every `ENGINE_TICK_MS` (15 s by default) the engine:
 The dashboard shows each bot's balance, P&L curve, trades, win rate, average and best/worst trade, average hold time, and open positions. Each position has a "Sell now" button.
 
 ## Keeping your money safe
-- **Persistent storage:** bot keys (AES-256-GCM encrypted) live in `DATA_DIR`. On Render this must be a persistent disk, which `render.yaml` sets up. On Render the server refuses to create wallets if `DATA_DIR` isn't set.
-- **Encryption key:** `WALLET_ENCRYPTION_KEY` decrypts every bot wallet. Store a copy somewhere safe, such as a password manager.
-- **Withdraw any time:** open a bot, then *Stats & wallet → Move funds out*, and send SOL to your own wallet.
-- **Export key:** *Stats & wallet → Export private key* gives a base58 key you can import into Phantom or Solflare. This is your backup if the server ever goes away.
-- **Delete is blocked** while a wallet still holds SOL or tokens, or has open positions, because deleting would destroy the only copy of the key.
-- **Live trading needs two switches:** `ENABLE_LIVE_TRADING=true` and `SOLANA_NETWORK=mainnet-beta`. Each bot must also be set to live mode and funded. Start with a small position size.
+- **Wallets can't be lost:** every bot wallet is derived from `WALLET_ENCRYPTION_KEY` plus a wallet number. If the database is wiped (Render's free plan does this whenever it sleeps or redeploys), the server checks the blockchain on startup and re-adds every bot wallet that still holds SOL or tokens, as "Recovered wallet #N". Back up `WALLET_ENCRYPTION_KEY`: it is the master key for all bot wallets.
+- **History:** trade history and bot settings live in `DATA_DIR`. On the free plan they reset when the instance sleeps, so use **Download backup** in the dashboard and **Restore** after a restart. A paid plan with a disk at `DATA_DIR` keeps them automatically.
+- **Withdraw any time:** *Stats & wallet → Move funds out* sends SOL to your own wallet.
+- **Export key:** *Stats & wallet → Export private key* gives a base58 key you can import into Phantom or Solflare.
+- **Delete is blocked** while a wallet holds SOL or tokens, or has open positions.
+- **Live trading needs two switches:** `ENABLE_LIVE_TRADING=true` and `SOLANA_NETWORK=mainnet-beta`. Each bot must also be set to live mode and funded. Start small.
 
 ## Render setup
-1. Render dashboard → **New → Blueprint** → pick this repo. It reads `render.yaml`, which creates the web service, a 1 GB disk at `/var/data`, and the env vars. Disks need a paid plan (Starter).
-   *If you already made the service by hand:* go to Service → **Disks** → add a disk at `/var/data`, then **Environment** → add `DATA_DIR=/var/data`.
-2. Set `WALLET_ENCRYPTION_KEY` to the output of `openssl rand -hex 32` and save a copy.
-3. `ADMIN_API_TOKEN` is generated automatically. Copy it from the Environment tab and use it to unlock the dashboard.
+Works on the **free plan**. The bots only run while the server is awake, and an open dashboard keeps it awake because it polls every 10 seconds. A free instance sleeps about 15 minutes after you close the tab, and the bots stop until you open it again. Positions left open while it sleeps are managed again when it wakes.
+1. Set `WALLET_ENCRYPTION_KEY` to the output of `openssl rand -hex 32` and save a copy somewhere safe.
+2. Set `ADMIN_API_TOKEN` to a long random password. You use it to unlock the dashboard.
+3. Optional: `NODE_VERSION=22`, `SOLANA_NETWORK=devnet`, `SOLANA_RPC_URL=https://api.devnet.solana.com`.
 4. Deploy, open the site, unlock, create a bot, and press **Start**. It runs in paper mode.
-5. To go live: set `SOLANA_NETWORK=mainnet-beta`, set `SOLANA_RPC_URL` to a paid RPC (Helius, QuickNode or Triton; the public one rate-limits), and set `ENABLE_LIVE_TRADING=true`. Then edit a bot to live mode, send SOL to its wallet address, and start it.
+5. To go live: set `SOLANA_NETWORK=mainnet-beta`, set `SOLANA_RPC_URL` to a paid RPC (Helius, QuickNode or Triton), and set `ENABLE_LIVE_TRADING=true`. Then edit a bot to live mode, send SOL to its wallet address, and start it.
+6. Optional, for history that survives restarts: switch to a paid plan, add a disk at `/var/data`, and set `DATA_DIR=/var/data`.
 
 ## Local run
 Node 20+. `npm install`, copy `.env.example` to `.env`, fill in the keys, then run `npm start`, `npm test` and `npm run check`.
@@ -37,6 +38,8 @@ Node 20+. `npm install`, copy `.env.example` to `.env`, fill in the keys, then r
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/overview` | Bots with balances and performance, totals, open positions, recent trades, engine health |
+| GET | `/api/backup` | Download settings and trade history (admin) |
+| POST | `/api/restore` | Restore a backup file (admin) |
 | GET | `/api/bots/:id/stats` | One bot's full stats, positions and trade history |
 | POST | `/api/bots` | Create a bot (admin) |
 | PATCH | `/api/bots/:id` | Edit settings, or `{ "enabled": true/false }` to start or pause (admin) |

@@ -1,6 +1,7 @@
 import express from 'express';
 import { calculateDevFeeLamports } from './policy.js';
 import { createEngine, STRATEGY_DEFAULTS } from './engine.js';
+import { deriveBotKeypair as deriveFromKey, scanDerivedWallets } from './wallets.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -63,7 +64,8 @@ const LIVE_TRADING_ENABLED = process.env.ENABLE_LIVE_TRADING === 'true' && netwo
 const events = [];
 let db = { bots: [], trades: [], positions: [], withdrawals: [], devFees: [], sweeps: [] };
 
-app.use(express.json({ limit: '32kb' }));
+const smallJson = express.json({ limit: '32kb' });
+app.use((req, res, next) => req.path === '/api/restore' ? next() : smallJson(req, res, next));
 app.use(express.static(path.join(__dirname, 'public')));
 function log(level, message) {
   events.unshift({ at: new Date().toISOString(), level, message });
@@ -79,12 +81,6 @@ function requireAdmin(req, res, next) {
 function encryptionKey() {
   if (!/^[a-f0-9]{64}$/i.test(ENCRYPTION_KEY)) throw new Error('WALLET_ENCRYPTION_KEY must be exactly 64 hexadecimal characters (32 bytes).');
   return Buffer.from(ENCRYPTION_KEY, 'hex');
-}
-function encryptSecret(secret) {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', encryptionKey(), iv);
-  const encrypted = Buffer.concat([cipher.update(Buffer.from(secret)), cipher.final()]);
-  return { iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), data: encrypted.toString('base64') };
 }
 function decryptSecret(record) {
   const decipher = createDecipheriv('aes-256-gcm', encryptionKey(), Buffer.from(record.iv, 'base64'));
@@ -109,8 +105,48 @@ function publicBot(bot) {
   const { encryptedSecret, ...safe } = bot;
   return safe;
 }
+// New bot wallets are derived from WALLET_ENCRYPTION_KEY, so they can be rebuilt even if the database is lost.
+function deriveBotKeypair(index) { return deriveFromKey(encryptionKey(), index); }
 function botKeypair(bot) {
+  if (Number.isInteger(bot.walletIndex)) return deriveBotKeypair(bot.walletIndex);
   return Keypair.fromSecretKey(Uint8Array.from(decryptSecret(bot.encryptedSecret)));
+}
+function nextWalletIndex() {
+  const used = db.bots.filter(b => Number.isInteger(b.walletIndex)).map(b => b.walletIndex + 1);
+  return Math.max(db.nextWalletIndex || 0, 0, ...used);
+}
+function newBotRecord(settings, walletIndex) {
+  const kp = deriveBotKeypair(walletIndex);
+  return {
+    id: randomUUID(), venue: 'Solana · Jupiter', walletIndex, walletAddress: kp.publicKey.toBase58(),
+    ...STRATEGY_DEFAULTS, ...settings, enabled: false, createdAt: new Date().toISOString(),
+    stats: { trades: 0, wins: 0, losses: 0, realizedPnlSol: 0, feesSol: 0 }, status: 'Paused'
+  };
+}
+// Rebuild bots for derived wallets that have on-chain history but are missing from the database
+// (for example after Render's free plan restarts with an empty disk). Stops after 20 unused wallets in a row.
+let recovery = { done: false, recovered: 0, error: null };
+async function recoverWallets() {
+  if (!/^[a-f0-9]{64}$/i.test(ENCRYPTION_KEY)) { recovery = { done: true, recovered: 0, error: null }; return; }
+  try {
+    const knownIndexes = new Set(db.bots.filter(b => Number.isInteger(b.walletIndex)).map(b => b.walletIndex));
+    const { found, nextIndex } = await scanDerivedWallets({ connection, keyBytes: encryptionKey(), knownIndexes, heldTokens: heldTokenAccounts });
+    db.nextWalletIndex = Math.max(db.nextWalletIndex || 0, nextIndex);
+    for (const w of found) {
+      if (db.bots.some(b => b.walletIndex === w.index)) continue;
+      const bot = newBotRecord({ name: `Recovered wallet #${w.index + 1}` }, w.index);
+      bot.status = w.tokens ? `Paused · recovered, holds ${w.tokens} token(s)` : 'Paused · recovered';
+      db.bots.push(bot);
+      recovery.recovered++;
+      log('warn', `Recovered ${bot.name} (${w.lamports / LAMPORTS_PER_SOL} SOL, ${w.tokens} token account(s)). Its trade history was not saved.`);
+    }
+    await saveDb();
+    recovery.done = true;
+  } catch (e) {
+    recovery.error = e.message;
+    log('error', `Wallet recovery scan failed, retrying in 60s: ${e.message}`);
+    setTimeout(recoverWallets, 60_000);
+  }
 }
 function requirePublicKey(value, label = 'address') {
   try { return new PublicKey(value); } catch { throw new Error(`Invalid Solana ${label}.`); }
@@ -217,7 +253,7 @@ app.get('/api/config', (_req, res) => {
     devFeePercent: DEV_FEE_PERCENT, devFeeBasis: 'positive_realized_profit_only',
     devFeeTransfersEnabled: DEV_FEE_ENABLED, liveSweepEnabled: LIVE_SWEEP_ENABLED,
     liveTradingEnabled: LIVE_TRADING_ENABLED,
-    setup: { adminTokenSet: Boolean(ADMIN_TOKEN), encryptionKeyValid: /^[a-f0-9]{64}$/i.test(ENCRYPTION_KEY), persistentDataDir: Boolean(process.env.DATA_DIR) },
+    setup: { adminTokenSet: Boolean(ADMIN_TOKEN), encryptionKeyValid: /^[a-f0-9]{64}$/i.test(ENCRYPTION_KEY), persistentDataDir: Boolean(process.env.DATA_DIR), recovery },
     note: 'Transfer destination is the configured dev wallet, not the treasury wallet.'
   });
 });
@@ -247,17 +283,11 @@ app.post('/api/bots', requireAdmin, async (req, res) => {
   try {
     const settings = validateBotSettings(req.body);
     if (settings.error) return res.status(400).json(settings);
-    if (process.env.RENDER && !process.env.DATA_DIR) return res.status(503).json({ error: 'Refusing to create a wallet: DATA_DIR is not set, so Render would erase the key on the next deploy. Attach a persistent disk first.' });
-    const kp = Keypair.generate();
-    const bot = {
-      id: randomUUID(), venue: 'Solana · Jupiter',
-      walletAddress: kp.publicKey.toBase58(), encryptedSecret: encryptSecret(kp.secretKey),
-      ...STRATEGY_DEFAULTS, ...settings, enabled: false,
-      createdAt: new Date().toISOString(),
-      stats: { trades: 0, wins: 0, losses: 0, realizedPnlSol: 0, feesSol: 0 },
-      status: 'Paused'
-    };
-    db.bots.push(bot); await saveDb(); log('info', `${bot.name} created with dedicated encrypted Solana wallet.`);
+    if (!recovery.done) return res.status(503).json({ error: 'Still checking the blockchain for your existing bot wallets. Try again in a few seconds.' });
+    const walletIndex = nextWalletIndex();
+    const bot = newBotRecord(settings, walletIndex);
+    db.nextWalletIndex = walletIndex + 1;
+    db.bots.push(bot); await saveDb(); log('info', `${bot.name} created with its own recoverable Solana wallet.`);
     res.status(201).json(publicBot(bot));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -405,6 +435,23 @@ app.post('/api/wallet/withdraw', requireAdmin, async (req, res) => {
     res.json({ ok: true, signature, explorerUrl: `https://explorer.solana.com/tx/${signature}?cluster=${network}` });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
+app.get('/api/backup', requireAdmin, (_req, res) => {
+  res.set('content-disposition', `attachment; filename="corvis-backup-${new Date().toISOString().slice(0, 10)}.json"`);
+  res.json({ format: 'corvis-backup-1', exportedAt: new Date().toISOString(), db });
+});
+app.post('/api/restore', requireAdmin, express.json({ limit: '20mb' }), async (req, res) => {
+  const incoming = req.body?.db;
+  if (req.body?.format !== 'corvis-backup-1' || !incoming || !Array.isArray(incoming.bots)) return res.status(400).json({ error: 'That is not a Corvis backup file.' });
+  if (db.bots.some(b => b.enabled)) return res.status(409).json({ error: 'Pause all bots before restoring.' });
+  const byIndex = new Map(incoming.bots.filter(b => Number.isInteger(b.walletIndex)).map(b => [b.walletIndex, b]));
+  // Keep bots recovered since the backup if the backup doesn't know their wallet.
+  const extra = db.bots.filter(b => !(Number.isInteger(b.walletIndex) && byIndex.has(b.walletIndex)) && !incoming.bots.some(x => x.id === b.id));
+  db = { bots: [], trades: [], positions: [], withdrawals: [], devFees: [], sweeps: [], ...incoming };
+  db.bots = [...db.bots, ...extra].map(b => ({ ...STRATEGY_DEFAULTS, ...b, enabled: false, status: 'Paused' }));
+  db.nextWalletIndex = Math.max(incoming.nextWalletIndex || 0, nextWalletIndex());
+  await saveDb(); log('info', `Backup restored: ${db.bots.length} bots, ${db.trades.length} trades.`);
+  res.json({ ok: true, bots: db.bots.length, trades: db.trades.length });
+});
 app.get('/api/withdrawals', (_req, res) => res.json(db.withdrawals.slice(-50).reverse()));
 app.get('/api/dev-fees', (_req, res) => res.json(db.devFees.slice(-50).reverse()));
 app.get('/api/events', (_req, res) => res.json(events));
@@ -417,9 +464,10 @@ const engine = createEngine({
 });
 await loadDb();
 engine.start();
+recoverWallets();
 if (!/^[a-f0-9]{64}$/i.test(ENCRYPTION_KEY)) log('warn', 'WALLET_ENCRYPTION_KEY is missing or invalid; bot wallets cannot be created.');
 if (!ADMIN_TOKEN) log('warn', 'ADMIN_API_TOKEN is not set; all wallet-changing actions are locked.');
-if (!process.env.DATA_DIR) log('warn', 'DATA_DIR is not set; on Render the wallet database is wiped on every deploy unless a persistent disk is mounted.');
+if (!process.env.DATA_DIR) log('warn', 'No persistent disk: trade history resets when the server restarts. Bot wallets are recovered automatically; download a backup to keep history.');
 app.listen(port, '0.0.0.0', () => {
   log('info', `Corvis backend started on ${network}; live trading ${LIVE_TRADING_ENABLED ? 'ENABLED' : 'off (paper only)'}.`);
   console.log(`Corvis Trading listening on ${port}`);

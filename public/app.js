@@ -51,7 +51,8 @@ function render() {
   $('#unlock').textContent = adminToken ? '🔓 Unlocked' : '🔒 Unlock';
 
   const alerts = [];
-  if (!c.setup?.persistentDataDir) alerts.push(['bad', 'DATA_DIR is not set. Bot wallet keys will be erased on the next deploy. Attach a Render disk and set DATA_DIR before funding any bot.']);
+  if (!c.setup?.persistentDataDir) alerts.push(['', 'Free-plan mode: trade history resets when Render sleeps or redeploys. Bot wallets are always recovered from your encryption key. Use Download backup to keep history.']);
+  if (c.setup?.recovery?.recovered) alerts.push(['', `Recovered ${c.setup.recovery.recovered} bot wallet(s) after a restart. Restore a backup to bring back their history.`]);
   if (!c.setup?.encryptionKeyValid) alerts.push(['bad', 'WALLET_ENCRYPTION_KEY is missing or invalid, so bot wallets cannot be created.']);
   if (!c.setup?.adminTokenSet) alerts.push(['', 'ADMIN_API_TOKEN is not set, so every control is locked.']);
   if (o.rpcError) alerts.push(['', o.rpcError]);
@@ -248,6 +249,25 @@ $('#detailDialog').addEventListener('click', async e => {
     const r = await post(`/api/bots/${encodeURIComponent(detailBotId)}/export-key`, { confirm: true });
     $('#secretOut').innerHTML = `<p class="small muted">Import into Phantom or Solflare as a private key. Store it offline; don't paste it anywhere else.</p><div class="secret mono">${esc(r.secretKeyBase58)}</div>`;
   } catch (err) { toast(err.message, true); }
+});
+
+// ---------- backup & restore ----------
+$('#backupBtn').addEventListener('click', async () => {
+  if (!requireUnlock()) return;
+  try {
+    const data = await api('/api/backup');
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+    const a = Object.assign(document.createElement('a'), { href: url, download: `corvis-backup-${new Date().toISOString().slice(0, 10)}.json` });
+    document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    toast('Backup downloaded');
+  } catch (err) { toast(err.message, true); }
+});
+$('#restoreBtn').addEventListener('click', () => { if (requireUnlock()) $('#restoreFile').click(); });
+$('#restoreFile').addEventListener('change', async e => {
+  const file = e.target.files[0]; e.target.value = '';
+  if (!file || !confirm('Restore this backup? Bots will be paused and current history replaced by the backup.')) return;
+  try { const r = await post('/api/restore', JSON.parse(await file.text())); toast(`Restored ${r.bots} bots and ${r.trades} trades`); refresh(); }
+  catch (err) { toast(err.message, true); }
 });
 
 // ---------- treasury & unlock ----------

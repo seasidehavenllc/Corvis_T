@@ -2,28 +2,29 @@ services:
   - type: web
     name: corvis-trading
     runtime: node
-    # Persistent disks require a paid Render instance type.
-    plan: starter
+    # Free works: bot wallets are derived from WALLET_ENCRYPTION_KEY and recovered after every restart.
+    # Trade history resets when a free instance sleeps; use the dashboard's backup button, or switch to
+    # a paid plan and uncomment the disk below to keep history automatically.
+    plan: free
     buildCommand: npm install --no-audit --no-fund
     startCommand: npm start
     healthCheckPath: /health
-    # Bot wallet keys are stored in DATA_DIR. Without a disk they are wiped on every deploy.
-    disk:
-      name: corvis-data
-      mountPath: /var/data
-      sizeGB: 1
+    # disk:
+    #   name: corvis-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
     envVars:
       - key: NODE_VERSION
-        value: 20
-      - key: DATA_DIR
-        value: /var/data
+        value: 22
+      # - key: DATA_DIR
+      #   value: /var/data
       - key: SOLANA_NETWORK
         value: devnet
       - key: SOLANA_RPC_URL
         value: https://api.devnet.solana.com
       - key: ADMIN_API_TOKEN
         generateValue: true
-      # Set by hand: output of `openssl rand -hex 32`. Back it up; losing it locks every bot wallet.
+      # Set by hand: output of `openssl rand -hex 32`. It is the master key for every bot wallet: back it up.
       - key: WALLET_ENCRYPTION_KEY
         sync: false
       - key: ENABLE_LIVE_TRADING
