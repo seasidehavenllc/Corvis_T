@@ -120,7 +120,12 @@ export function createEngine({
     const jup = new URL(url).host === JUP_HOST;
     if (jup) await takeJupiter(priority);
     const res = await fetchImpl(url, { ...init, headers: { accept: 'application/json', ...(jup ? JUPITER_HEADERS : {}), ...(init?.headers || {}) } });
-    if (!res.ok) throw new Error(`${new URL(url).host} responded ${res.status}`);
+    if (!res.ok) {
+      const body = await res.text?.().catch(() => '') || '';
+      // Jupiter answers 400 when a token has no route (e.g. liquidity pulled); report it as such.
+      if (res.status === 400 && /route|not tradable|TOKEN_NOT_TRADABLE/i.test(body)) throw new Error('No Jupiter route for this token.');
+      throw new Error(`${new URL(url).host} responded ${res.status}${body ? `: ${body.slice(0, 120)}` : ''}`);
+    }
     return res.json();
   }
   // Free market-data APIs rate-limit shared hosting IPs (Render included). A source that answers 429 is
