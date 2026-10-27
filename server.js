@@ -1,6 +1,6 @@
 import express from 'express';
 import { calculateDevFeeLamports } from './policy.js';
-import { createEngine, STRATEGY_DEFAULTS, MAX_FOLLOWED, tradeJournal, walletRecord } from './engine.js';
+import { createEngine, STRATEGY_DEFAULTS, MAX_FOLLOWED, tradeJournal } from './engine.js';
 import { deriveBotKeypair as deriveFromKey, scanDerivedWallets } from './wallets.js';
 import { runSelfTest } from './selftest.js';
 import path from 'node:path';
@@ -318,8 +318,9 @@ function validateBotSettings(body, current = {}) {
     try { new PublicKey(w); } catch { return { error: `Not a Solana wallet address: ${w.slice(0, 50)}` }; }
   }
   const followOnly = Boolean(body?.followOnly ?? current.followOnly ?? false);
-  if (followOnly && !followWallets.length) return { error: 'Add at least one wallet to follow, or turn off "only buy what they buy".' };
-  return { name, takeProfitMultiplier, stopLossPercent, stopLossFollowsPrice, maxPositionSol, mode, ...strategy, followWallets, followOnly };
+  const autoFollow = Boolean(body?.autoFollow ?? current.autoFollow ?? false);
+  if (followOnly && !followWallets.length && !autoFollow) return { error: 'Add at least one wallet to follow or turn on auto-find, or turn off "only buy what they buy".' };
+  return { name, takeProfitMultiplier, stopLossPercent, stopLossFollowsPrice, maxPositionSol, mode, ...strategy, followWallets, followOnly, autoFollow };
 }
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
@@ -356,7 +357,7 @@ app.get('/api/overview', async (_req, res) => {
   }), { balanceSol: 0, realizedPnlSol: 0, trades: 0, wins: 0, feesSol: 0 });
   const positions = db.positions.map(p => ({ ...p, tokenRaw: undefined, multiple: engine.estimateMultiple(p), botName: db.bots.find(b => b.id === p.botId)?.name }));
   const recentTrades = db.trades.slice(-50).reverse().map(t => ({ ...t, botName: db.bots.find(b => b.id === t.botId)?.name }));
-  res.json({ network, liveTradingEnabled: LIVE_TRADING_ENABLED, bots: withBalances, totals, positions, rpcError, recentTrades, engine: engine.health });
+  res.json({ network, liveTradingEnabled: LIVE_TRADING_ENABLED, bots: withBalances, totals, positions, rpcError, recentTrades, smartWallets: db.smartWallets || [], engine: engine.health });
 });
 app.post('/api/bots', requireAdmin, async (req, res) => {
   try {
@@ -593,12 +594,7 @@ app.get('/api/wallets/:address/record', requireAdmin, async (req, res) => {
   const cached = walletRecords.get(address);
   if (cached && Date.now() - cached.at < 10 * 60_000) return res.json(cached.record);
   try {
-    const sigs = (await marketConnection.getSignaturesForAddress(owner, { limit: 100 }, 'confirmed')).filter(s => !s.err);
-    const txs = [];
-    for (let i = 0; i < sigs.length; i += 4) {
-      txs.push(...await Promise.all(sigs.slice(i, i + 4).map(s => marketConnection.getParsedTransaction(s.signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }).catch(() => null))));
-    }
-    const record = { address, ...walletRecord(txs.filter(Boolean), address) };
+    const record = await engine.gradeWallet(address);
     walletRecords.set(address, { at: Date.now(), record });
     log('info', `Wallet check ${address}: ${JSON.stringify(record)}`);
     res.json(record);
