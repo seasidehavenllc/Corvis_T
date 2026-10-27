@@ -1,6 +1,6 @@
 import express from 'express';
 import { calculateDevFeeLamports } from './policy.js';
-import { createEngine, STRATEGY_DEFAULTS } from './engine.js';
+import { createEngine, STRATEGY_DEFAULTS, tradeJournal } from './engine.js';
 import { deriveBotKeypair as deriveFromKey, scanDerivedWallets } from './wallets.js';
 import { runSelfTest } from './selftest.js';
 import path from 'node:path';
@@ -232,7 +232,7 @@ function validateBotSettings(body, current = {}) {
   const stopLossPercent = Number(body?.stopLossPercent ?? current.stopLossPercent ?? 15);
   const maxPositionSol = Number(body?.maxPositionSol ?? current.maxPositionSol ?? 0.05);
   if (!name) return { error: 'Bot name is required.' };
-  if (!(takeProfitMultiplier > 1 && takeProfitMultiplier <= 10)) return { error: 'Take profit multiplier must be greater than 1 and at most 10.' };
+  if (!(takeProfitMultiplier > 1 && takeProfitMultiplier <= 10)) return { error: 'Sell-all profit target must be above 0% and at most 900%.' };
   if (!(stopLossPercent > 0 && stopLossPercent <= 100)) return { error: 'Stop loss must be between 0 and 100%.' };
   if (!(maxPositionSol > 0 && maxPositionSol <= 10)) return { error: 'Max position must be greater than 0 and at most 10 SOL.' };
   const pick = key => Number(body?.[key] ?? current[key] ?? STRATEGY_DEFAULTS[key]);
@@ -242,8 +242,20 @@ function validateBotSettings(body, current = {}) {
     minLiquidityUsd: pick('minLiquidityUsd'), maxPairAgeMinutes: pick('maxPairAgeMinutes'), minBuys5m: pick('minBuys5m'),
     maxOpenPositions: pick('maxOpenPositions'), maxHoldMinutes: pick('maxHoldMinutes'), slippageBps: pick('slippageBps'),
     maxDailyLossSol: pick('maxDailyLossSol'), minBuySellRatio: pick('minBuySellRatio'),
-    trailingStopPercent: pick('trailingStopPercent'), priorityFeeSol: pick('priorityFeeSol'), maxPriceImpactPct: pick('maxPriceImpactPct')
+    trailingStopPercent: pick('trailingStopPercent'), priorityFeeSol: pick('priorityFeeSol'), maxPriceImpactPct: pick('maxPriceImpactPct'),
+    maxRoundTripPct: pick('maxRoundTripPct'), minHolders: pick('minHolders'), maxTopHoldersPct: pick('maxTopHoldersPct'),
+    maxDevHoldingPct: pick('maxDevHoldingPct'), maxDevLaunches: pick('maxDevLaunches'), minOrganicScore: pick('minOrganicScore'),
+    minPairAgeMinutes: pick('minPairAgeMinutes'), partialTakeProfitMultiplier: pick('partialTakeProfitMultiplier'), partialSellPercent: pick('partialSellPercent')
   };
+  for (const [k, label] of [['maxDevHoldingPct', 'Dev holding limit'], ['minOrganicScore', 'Minimum organic score'], ['partialSellPercent', 'Partial sell']]) {
+    if (!(strategy[k] >= 0 && strategy[k] <= 100)) return { error: `${label} must be 0 (off) to 100.` };
+  }
+  if (!(Number.isInteger(strategy.maxDevLaunches) && strategy.maxDevLaunches >= 0)) return { error: 'Dev launches limit must be a whole number, 0 (off) or more.' };
+  if (!(strategy.minPairAgeMinutes >= 0 && strategy.minPairAgeMinutes < strategy.maxPairAgeMinutes)) return { error: 'Minimum pair age must be 0 or more and below the maximum age.' };
+  if (strategy.partialSellPercent > 0 && !(strategy.partialTakeProfitMultiplier > 1 && strategy.partialTakeProfitMultiplier < takeProfitMultiplier)) return { error: 'The first target must be above 0% and below the sell-all target.' };
+  if (!(strategy.maxRoundTripPct >= 0 && strategy.maxRoundTripPct <= 100)) return { error: 'Max round-trip cost must be 0 (off) to 100%.' };
+  if (!(Number.isInteger(strategy.minHolders) && strategy.minHolders >= 0)) return { error: 'Minimum holders must be a whole number, 0 or more.' };
+  if (!(strategy.maxTopHoldersPct >= 0 && strategy.maxTopHoldersPct <= 100)) return { error: 'Top holders limit must be 0 (off) to 100%.' };
   if (!(strategy.maxPriceImpactPct >= 0 && strategy.maxPriceImpactPct <= 100)) return { error: 'Max price impact must be 0 (off) to 100%.' };
   if (!(strategy.minBuySellRatio >= 0 && strategy.minBuySellRatio <= 20)) return { error: 'Buy/sell ratio must be between 0 and 20.' };
   if (!(strategy.trailingStopPercent >= 0 && strategy.trailingStopPercent < 100)) return { error: 'Trailing stop must be 0 (off) to 99%.' };
@@ -290,7 +302,7 @@ app.get('/api/overview', async (_req, res) => {
     wins: t.wins + (b.stats?.wins || 0),
     feesSol: t.feesSol + (b.stats?.feesSol || 0)
   }), { balanceSol: 0, realizedPnlSol: 0, trades: 0, wins: 0, feesSol: 0 });
-  const positions = db.positions.map(p => ({ ...p, multiple: p.lastPrice / p.entryPrice, botName: db.bots.find(b => b.id === p.botId)?.name }));
+  const positions = db.positions.map(p => ({ ...p, tokenRaw: undefined, multiple: engine.estimateMultiple(p), botName: db.bots.find(b => b.id === p.botId)?.name }));
   const recentTrades = db.trades.slice(-50).reverse().map(t => ({ ...t, botName: db.bots.find(b => b.id === t.botId)?.name }));
   res.json({ network, liveTradingEnabled: LIVE_TRADING_ENABLED, bots: withBalances, totals, positions, rpcError, recentTrades, engine: engine.health });
 });
@@ -312,7 +324,7 @@ app.get('/api/bots/:id/stats', async (req, res) => {
   try {
     const balanceSol = await connection.getBalance(new PublicKey(bot.walletAddress), 'confirmed').then(l => l / LAMPORTS_PER_SOL, () => null);
     const trades = db.trades.filter(t => t.botId === bot.id);
-    res.json({ bot: publicBot(bot), balanceSol, stats: bot.stats, perf: botPerformance(bot.id), trades: trades.slice(-100).reverse(), positions: db.positions.filter(p => p.botId === bot.id), tradingMode: bot.mode });
+    res.json({ bot: publicBot(bot), balanceSol, stats: bot.stats, perf: botPerformance(bot.id), trades: trades.slice(-100).reverse(), positions: db.positions.filter(p => p.botId === bot.id).map(p => ({ ...p, tokenRaw: undefined, multiple: engine.estimateMultiple(p) })), tradingMode: bot.mode });
   } catch (e) { res.status(502).json({ error: `Unable to query Solana RPC: ${e.message}` }); }
 });
 app.patch('/api/bots/:id', requireAdmin, async (req, res) => {
@@ -333,6 +345,17 @@ app.post('/api/bots/:id/positions/:pid/close', requireAdmin, async (req, res) =>
   if (!bot || !position) return res.status(404).json({ error: 'Position not found.' });
   try { const trade = await engine.closePosition(bot, position, 'manual'); await saveDb(); res.json({ ok: true, trade }); }
   catch (e) { res.status(502).json({ error: `Sell failed: ${e.message}` }); }
+});
+// Pause the bot and sell every open position now.
+app.post('/api/bots/:id/sell-all', requireAdmin, async (req, res) => {
+  const bot = db.bots.find(b => b.id === req.params.id);
+  if (!bot) return res.status(404).json({ error: 'Bot not found.' });
+  Object.assign(bot, { enabled: false, status: 'Paused' });
+  await saveDb(); log('info', `${bot.name} paused; selling all open positions.`);
+  const results = await Promise.allSettled(db.positions.filter(p => p.botId === bot.id).map(p => engine.closePosition(bot, p, 'manual')));
+  await saveDb();
+  const failed = results.filter(r => r.status === 'rejected').map(r => r.reason?.message);
+  res.json({ ok: !failed.length, sold: results.length - failed.length, failed });
 });
 app.post('/api/bots/:id/withdraw', requireAdmin, async (req, res) => {
   try {
@@ -506,6 +529,10 @@ app.post('/api/restore', requireAdmin, express.json({ limit: '20mb' }), async (r
   await saveDb(); log('info', `Backup restored: ${db.bots.length} bots, ${db.trades.length} trades.`);
   res.json({ ok: true, bots: db.bots.length, trades: db.trades.length });
 });
+app.get('/api/journal', (req, res) => {
+  const trades = req.query.bot ? db.trades.filter(t => t.botId === req.query.bot) : db.trades;
+  res.json({ trades: trades.filter(t => t.features).length, signals: tradeJournal(trades) });
+});
 app.get('/api/withdrawals', (_req, res) => res.json(db.withdrawals.slice(-50).reverse()));
 app.get('/api/dev-fees', (_req, res) => res.json(db.devFees.slice(-50).reverse()));
 app.get('/api/events', (_req, res) => res.json(events));
@@ -514,8 +541,8 @@ app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: e
 const engine = createEngine({
   db: new Proxy({}, { get: (_t, k) => db[k], set: (_t, k, v) => { db[k] = v; return true; } }),
   save: saveDb, log, connection, marketConnection, getKeypair: botKeypair, liveAllowed: LIVE_TRADING_ENABLED,
-  monitorMs: Number(process.env.ENGINE_MONITOR_MS || (process.env.JUPITER_API_KEY ? 1000 : 3000)),
-  scanMs: Number(process.env.ENGINE_SCAN_MS || (process.env.JUPITER_API_KEY ? 3000 : 6000))
+  monitorMs: Number(process.env.ENGINE_MONITOR_MS || 1000),
+  scanMs: Number(process.env.ENGINE_SCAN_MS || (process.env.JUPITER_API_KEY ? 5000 : 6000))
 });
 await loadDb();
 engine.start();

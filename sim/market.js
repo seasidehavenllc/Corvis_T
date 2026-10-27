@@ -25,11 +25,16 @@ export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:0
   function launch() {
     const mint = Keypair.generate().publicKey.toBase58();
     const r = rand();
-    // pump: rallies then fades; rug: liquidity pulled; dud: drifts down; moon: big run.
-    const kind = r < 0.3 ? 'pump' : r < 0.5 ? 'rug' : r < 0.9 ? 'dud' : 'moon';
+    // pump: rallies then fades; rug: liquidity pulled; dud: drifts down; moon: big run;
+    // honeypot: looks like a pump but can never be sold back (what wiped out real paper runs).
+    const kind = r < 0.25 ? 'pump' : r < 0.42 ? 'rug' : r < 0.52 ? 'honeypot' : r < 0.9 ? 'dud' : 'moon';
+    const realLiq = 2_000 + rand() * 60_000;
     state.tokens.set(mint, {
       mint, kind, symbol: `SIM${state.tokens.size + 1}`, createdAt: state.now,
-      price: 1e-6 * (0.5 + rand()), liquidityUsd: 2_000 + rand() * 60_000,
+      price: 1e-6 * (0.5 + rand()), liquidityUsd: realLiq,
+      // Feeds often overstate liquidity for brand-new pools, and price APIs lag the pool.
+      reportedLiquidityUsd: realLiq * (1 + rand() * 2), apiPrice: null, apiLagMs: 10_000 + rand() * 50_000, priceLog: [],
+      holders: Math.floor(10 + rand() * 300), topHoldersPct: 10 + rand() * 60, devPct: rand() * 15, devMints: Math.floor(rand() * 40),
       mintAuthority: rand() < 0.2 ? Keypair.generate().publicKey.toBase58() : null,
       rugAt: state.now + (3 + rand() * 20) * 60_000, peakAt: state.now + (2 + rand() * 10) * 60_000,
       history: [], buys5m: 0, sells5m: 0, dead: false
@@ -45,10 +50,14 @@ export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:0
       if (t.kind === 'pump') drift = state.now < t.peakAt ? 0.06 : -0.05;
       if (t.kind === 'moon') drift = state.now < t.peakAt + 10 * 60_000 ? 0.07 : -0.03;
       if (t.kind === 'dud') drift = -0.02;
-      if (t.kind === 'rug' && state.now < t.rugAt) drift = 0.04;
+      if ((t.kind === 'rug' && state.now < t.rugAt) || t.kind === 'honeypot') drift = 0.04;
       const before = t.price;
       t.price *= Math.exp(drift * dtMin + vol * Math.sqrt(dtMin) * gauss());
       if (t.kind === 'rug' && state.now >= t.rugAt) { t.price *= 0.03; t.liquidityUsd = 50; t.dead = true; }
+      // Price API: the pool price from apiLagMs ago, with some noise.
+      t.priceLog.push({ at: state.now, price: t.price });
+      while (t.priceLog.length > 1 && state.now - t.priceLog[1].at >= t.apiLagMs) t.priceLog.shift();
+      t.apiPrice = t.priceLog[0].price * (1 + 0.1 * gauss());
       const up = t.price >= before;
       t.history.push({ at: state.now, up });
       t.history = t.history.filter(h => state.now - h.at < 5 * 60_000);
@@ -62,7 +71,7 @@ export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:0
     return {
       chainId: 'solana', dexId: 'raydium', url: `https://sim/${t.symbol}`, pairAddress: `pair_${t.mint}`,
       baseToken: { address: t.mint, symbol: t.symbol }, quoteToken: { address: SOL_MINT, symbol: 'SOL' },
-      priceNative: String(t.price), liquidity: { usd: t.liquidityUsd }, txns: { m5: { buys: t.buys5m, sells: t.sells5m } },
+      priceNative: String(t.apiPrice ?? t.price), liquidity: { usd: t.reportedLiquidityUsd }, txns: { m5: { buys: t.buys5m, sells: t.sells5m } },
       pairCreatedAt: t.createdAt
     };
   }
@@ -89,19 +98,19 @@ export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:0
       const page = Number(u.searchParams.get('page') || 1);
       const slice = recent.sort((a, b) => b.createdAt - a.createdAt).slice((page - 1) * 20, page * 20);
       return ok({ data: slice.map(t => ({
-        attributes: { address: `pool_${t.mint}`, name: `${t.symbol} / SOL`, base_token_price_native_currency: String(t.price), reserve_in_usd: String(t.liquidityUsd), pool_created_at: new Date(t.createdAt).toISOString(), transactions: { m5: { buys: t.buys5m, sells: t.sells5m } } },
+        attributes: { address: `pool_${t.mint}`, name: `${t.symbol} / SOL`, base_token_price_native_currency: String(t.apiPrice ?? t.price), reserve_in_usd: String(t.reportedLiquidityUsd), pool_created_at: new Date(t.createdAt).toISOString(), transactions: { m5: { buys: t.buys5m, sells: t.sells5m } } },
         relationships: { base_token: { data: { id: `solana_${t.mint}` } }, quote_token: { data: { id: `solana_${SOL_MINT}` } }, dex: { data: { id: 'raydium' } } }
       })) });
     }
     if (u.pathname.startsWith('/tokens/v2/')) {
-      const jup = t => ({ id: t.mint, symbol: t.symbol, usdPrice: t.price * 150, liquidity: t.liquidityUsd, stats5m: { numBuys: t.buys5m, numSells: t.sells5m }, firstPool: { id: `pool_${t.mint}`, createdAt: new Date(t.createdAt).toISOString() } });
+      const jup = t => ({ id: t.mint, symbol: t.symbol, usdPrice: (t.apiPrice ?? t.price) * 150, liquidity: t.reportedLiquidityUsd, holderCount: t.holders, audit: { topHoldersPercentage: t.topHoldersPct, devBalancePercentage: t.devPct, devMints: t.devMints }, stats5m: { numBuys: t.buys5m, numSells: t.sells5m }, firstPool: { id: `pool_${t.mint}`, createdAt: new Date(t.createdAt).toISOString() } });
       if (u.pathname.endsWith('/recent')) return ok([...state.tokens.values()].filter(t => state.now - t.createdAt < 10 * 60_000).sort((a, b) => b.createdAt - a.createdAt).slice(0, 30).map(jup));
       return ok(u.searchParams.get('query').split(',').map(m => state.tokens.get(m)).filter(Boolean).map(jup));
     }
     if (u.pathname.startsWith('/price/v3')) {
       const SOL_USD = 150;
       const out = { [SOL_MINT]: { usdPrice: SOL_USD } };
-      for (const id of u.searchParams.get('ids').split(',')) { const t = state.tokens.get(id); if (t) out[id] = { usdPrice: t.price * SOL_USD }; }
+      for (const id of u.searchParams.get('ids').split(',')) { const t = state.tokens.get(id); if (t) out[id] = { usdPrice: (t.apiPrice ?? t.price) * SOL_USD }; }
       return ok(out);
     }
     if (downHosts.has(u.host)) return { ok: false, status: 429, json: async () => ({}) };
@@ -115,7 +124,7 @@ export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:0
       const inputMint = u.searchParams.get('inputMint');
       const outputMint = u.searchParams.get('outputMint');
       const t = state.tokens.get(inputMint === SOL_MINT ? outputMint : inputMint);
-      if (!t || t.liquidityUsd < 100) return ok({ error: 'No routes found' });
+      if (!t || t.liquidityUsd < 100 || (t.kind === 'honeypot' && inputMint !== SOL_MINT)) return { ok: false, status: 400, text: async () => '{"error":"No routes found","errorCode":"COULD_NOT_FIND_ANY_ROUTE"}', json: async () => ({}) };
       const amount = u.searchParams.get('amount');
       const liqSol = Math.max(t.liquidityUsd / 200 / 2, 0.01);
       const tradeSol = inputMint === SOL_MINT ? Number(amount) / LAMPORTS_PER_SOL : Number(amount) / 10 ** DECIMALS * t.price;

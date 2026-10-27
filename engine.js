@@ -5,24 +5,29 @@ import { randomUUID } from 'node:crypto';
 export const SOL_MINT = 'So11111111111111111111111111111111111111112';
 export const DEXSCREENER = 'https://api.dexscreener.com';
 export const GECKOTERMINAL = 'https://api.geckoterminal.com/api/v2';
-// A free key from portal.jup.ag (JUPITER_API_KEY) moves requests to api.jup.ag with much higher limits.
+// A key from portal.jup.ag (JUPITER_API_KEY) moves requests to api.jup.ag. The free key allows about
+// 60 requests a minute; set JUPITER_RPM to your plan's limit if you upgrade.
 const JUP_KEY = process.env.JUPITER_API_KEY || '';
 const JUP_BASE = JUP_KEY ? 'https://api.jup.ag' : 'https://lite-api.jup.ag';
 export const JUPITER = process.env.JUPITER_API_URL || `${JUP_BASE}/swap/v1`;
 export const JUPITER_PRICE = process.env.JUPITER_PRICE_URL || `${JUP_BASE}/price/v3`;
 export const JUPITER_TOKENS = process.env.JUPITER_TOKENS_URL || `${JUP_BASE}/tokens/v2`;
 export const JUPITER_HEADERS = JUP_KEY ? { 'x-api-key': JUP_KEY } : {};
-export const JUPITER_RPM = Number(process.env.JUPITER_RPM || (JUP_KEY ? 500 : 50));
+export const JUPITER_RPM = Number(process.env.JUPITER_RPM || (JUP_KEY ? 60 : 50));
 const TX_FEE_SOL = 0.000005;
+const LOCKED_FLOOR = 1.02; // whole-trade multiple kept once the first target is banked
+const AUDIT_KEYS = ['holders', 'topHoldersPct', 'devPct', 'devMints', 'isSus', 'organicScore', 'traders5m', 'organicBuyers5m'];
 const SEEN_TTL_MS = 30 * 60 * 1000;
 const WATCHLIST_MAX = 120;
+const REVALUE_MS = 15_000; // re-quote each open position at least this often
+const PRICE_MS = 3_000; // spot price refresh for open positions
 
 export const STRATEGY_DEFAULTS = {
   mode: 'paper',
-  takeProfitMultiplier: 1.45,
+  takeProfitMultiplier: 1.5,
   stopLossPercent: 15,
   maxPositionSol: 0.05,
-  minLiquidityUsd: 5000,
+  minLiquidityUsd: 8000,
   maxPairAgeMinutes: 30,
   minBuys5m: 10,
   minBuySellRatio: 1.2,
@@ -31,7 +36,16 @@ export const STRATEGY_DEFAULTS = {
   trailingStopPercent: 12,
   slippageBps: 500,
   maxPriceImpactPct: 8,
-  priorityFeeSol: 0.0005,
+  maxRoundTripPct: 6,
+  minHolders: 40,
+  maxTopHoldersPct: 35,
+  maxDevHoldingPct: 10,
+  maxDevLaunches: 20,
+  minOrganicScore: 0,
+  minPairAgeMinutes: 0,
+  partialTakeProfitMultiplier: 1.3,
+  partialSellPercent: 50,
+  priorityFeeSol: 0.0003,
   maxDailyLossSol: 0.2,
   paperBalanceSol: 1
 };
@@ -56,23 +70,64 @@ export function passesFilters(pair, bot, now = Date.now()) {
   const sells = pair.txns?.m5?.sells || 0;
   if ((pair.liquidity?.usd || 0) < bot.minLiquidityUsd) reasons.push('liquidity');
   if (!pair.pairCreatedAt || now - pair.pairCreatedAt > bot.maxPairAgeMinutes * 60_000) reasons.push('age');
+  if (bot.minPairAgeMinutes > 0 && pair.pairCreatedAt && now - pair.pairCreatedAt < bot.minPairAgeMinutes * 60_000) reasons.push('too_new');
+  // Rug signals from Jupiter's token audit (skipped when a feed doesn't report them).
+  if (pair.isSus) reasons.push('flagged');
+  if (bot.maxDevHoldingPct > 0 && pair.devPct != null && pair.devPct > bot.maxDevHoldingPct) reasons.push('dev_holding');
+  if (bot.maxDevLaunches > 0 && pair.devMints != null && pair.devMints > bot.maxDevLaunches) reasons.push('serial_launcher');
+  if (bot.minOrganicScore > 0 && pair.organicScore != null && pair.organicScore < bot.minOrganicScore) reasons.push('organic');
   if (buys < bot.minBuys5m) reasons.push('buys');
+  // Holder spread (from Jupiter's token data; skipped when a feed doesn't report it).
+  if (bot.minHolders > 0 && pair.holders != null && pair.holders < bot.minHolders) reasons.push('holders');
+  if (bot.maxTopHoldersPct > 0 && pair.topHoldersPct != null && pair.topHoldersPct > bot.maxTopHoldersPct) reasons.push('concentration');
   // Momentum: more buyers than sellers in the last 5 minutes.
   if (bot.minBuySellRatio > 0 && buys < bot.minBuySellRatio * Math.max(sells, 1)) reasons.push('momentum');
   return reasons;
 }
 
-// Decide whether an open position should be closed at the current SOL price.
-export function exitReason(position, bot, price, now = Date.now()) {
-  const multiple = price / position.entryPrice;
-  const peak = Math.max(position.peakPrice || position.entryPrice, price);
+// Whether to bank part of a position at the first target (scale out, like most successful traders do).
+export function partialDue(position, bot, multiple) {
+  return !position.partialDone && bot.partialSellPercent > 0 && bot.partialSellPercent < 100 &&
+    bot.partialTakeProfitMultiplier > 1 && multiple >= bot.partialTakeProfitMultiplier && multiple < bot.takeProfitMultiplier;
+}
+
+// Decide whether an open position should be closed. `multiple` is what selling now would return
+// (after fees) divided by the SOL spent, so take profit and stop loss match the P&L actually booked.
+export function exitReason(position, bot, multiple, now = Date.now()) {
+  const peak = Math.max(position.peakMultiple || 0, multiple);
   if (multiple >= bot.takeProfitMultiplier) return 'take_profit';
+  // After the first target has been banked, the rest of the position may not turn the trade into a loss.
+  if (position.partialDone && multiple <= LOCKED_FLOOR) return 'protect_profit';
   if (multiple <= 1 - bot.stopLossPercent / 100) return 'stop_loss';
-  // Trailing stop arms once the position is up by the trail distance, then sells on that much pullback from the peak.
+  // Trailing stop arms once the position is up by the trail distance. It then sells on that much pullback
+  // from the peak, and never lets an armed winner fall back below break-even.
   const trail = (bot.trailingStopPercent || 0) / 100;
-  if (trail > 0 && peak >= position.entryPrice * (1 + trail) && price <= peak * (1 - trail)) return 'trailing_stop';
+  if (trail > 0 && peak >= 1 + trail && (multiple <= peak * (1 - trail) || multiple <= 1)) return 'trailing_stop';
   if (now - Date.parse(position.openedAt) >= bot.maxHoldMinutes * 60_000) return 'max_hold';
   return null;
+}
+
+// Trade journal: for each signal seen at entry, split trades into ranges and show how each range did.
+const JOURNAL = [
+  ['ageMin', 'Pair age (min)', [2, 5, 15]], ['liquidityUsd', 'Liquidity ($)', [10_000, 25_000, 60_000]],
+  ['buys5m', 'Buys in 5m', [20, 50, 150]], ['buySellRatio', 'Buy/sell ratio', [1.5, 2, 3]],
+  ['holders', 'Holders', [100, 300, 1000]], ['topHoldersPct', 'Top 10 hold (%)', [15, 25, 35]],
+  ['devPct', 'Dev holds (%)', [1, 3, 10]], ['devMints', 'Dev launches', [1, 5, 20]],
+  ['organicScore', 'Organic score', [10, 30, 60]], ['traders5m', 'Traders in 5m', [20, 50, 150]],
+  ['roundTripPct', 'Round-trip cost (%)', [2, 4, 6]], ['priceImpactPct', 'Price impact (%)', [1, 3, 6]]
+];
+export function tradeJournal(trades) {
+  const withFeatures = trades.filter(t => t.features);
+  return JOURNAL.map(([key, label, cuts]) => {
+    const ranges = [...cuts, Infinity].map((hi, i) => ({ lo: i ? cuts[i - 1] : -Infinity, hi, trades: 0, wins: 0, pnlSol: 0 }));
+    for (const t of withFeatures) {
+      const v = t.features[key];
+      if (v == null) continue;
+      const r = ranges.find(x => v < x.hi);
+      r.trades += 1; r.pnlSol += t.pnlSol; if (t.pnlSol > 0) r.wins += 1;
+    }
+    return { key, label, ranges: ranges.map(r => ({ label: r.lo === -Infinity ? `< ${r.hi}` : r.hi === Infinity ? `≥ ${r.lo}` : `${r.lo}–${r.hi}`, trades: r.trades, winRate: r.trades ? r.wins / r.trades : null, pnlSol: r.pnlSol })) };
+  });
 }
 
 export function todayPnl(trades, botId, now = Date.now()) {
@@ -148,6 +203,7 @@ export function createEngine({
     return out;
   }
   let solUsd = null;
+  let lastSearchAt = 0;
   // Current SOL price of each token, from Jupiter's price API, with DexScreener filling any gaps.
   async function pricesFor(mints) {
     const out = new Map();
@@ -165,6 +221,7 @@ export function createEngine({
     if (missing.length) for (const [m, pair] of await dexPairs(missing)) out.set(m, Number(pair.priceNative));
     return out;
   }
+  const num = v => v == null || !Number.isFinite(Number(v)) ? null : Number(v);
   // Jupiter token (from /tokens/v2) -> the DexScreener-shaped pair the filters expect.
   function jupiterPair(t) {
     const price = Number(t?.usdPrice) / solUsd;
@@ -174,7 +231,10 @@ export function createEngine({
       url: `https://jup.ag/tokens/${t.id}`, baseToken: { address: t.id, symbol: t.symbol || '?' }, quoteToken: { address: SOL_MINT },
       priceNative: String(price), liquidity: { usd: Number(t.liquidity) || 0 },
       txns: { m5: { buys: t.stats5m?.numBuys || 0, sells: t.stats5m?.numSells || 0 } },
-      pairCreatedAt: Date.parse(t.firstPool?.createdAt) || null
+      pairCreatedAt: Date.parse(t.firstPool?.createdAt) || null,
+      holders: num(t.holderCount), topHoldersPct: num(t.audit?.topHoldersPercentage),
+      devPct: num(t.audit?.devBalancePercentage), devMints: num(t.audit?.devMints), isSus: t.audit?.isSus === true,
+      organicScore: num(t.organicScore), traders5m: num(t.stats5m?.numTraders), organicBuyers5m: num(t.stats5m?.numOrganicBuyers)
     };
   }
   // GeckoTerminal pool -> the DexScreener-shaped pair the filters expect.
@@ -206,7 +266,11 @@ export function createEngine({
       if (!pair) return;
       add(pair.baseToken.address);
       const cur = pairs.get(pair.baseToken.address);
-      if (!cur || pair.liquidity.usd > cur.liquidity.usd) pairs.set(pair.baseToken.address, pair);
+      if (!cur) return pairs.set(pair.baseToken.address, pair);
+      // Keep the deeper pool's price and liquidity, plus any holder/audit data either feed has.
+      const [main, other] = pair.liquidity.usd > cur.liquidity.usd ? [pair, cur] : [cur, pair];
+      for (const k of AUDIT_KEYS) if (main[k] == null && other[k] != null) main[k] = other[k];
+      pairs.set(pair.baseToken.address, main);
     };
     const sources = {};
     if (!solUsd) await pricesFor([]);
@@ -225,7 +289,8 @@ export function createEngine({
     health.watching = watch.size;
     // Refresh watched tokens that weren't in this scan's feeds: Jupiter token search first, then DexScreener.
     let stale = [...watch.keys()].filter(m => !pairs.has(m));
-    if (stale.length && solUsd) {
+    if (stale.length && solUsd && now - lastSearchAt >= 30_000) {
+      lastSearchAt = now;
       for (let i = 0; i < stale.length; i += 100) {
         try { for (const t of await feedJson(`${JUPITER_TOKENS}/search?query=${stale.slice(i, i + 100).join(',')}`, 30_000) || []) { const p = jupiterPair(t); if (p) pairs.set(p.baseToken.address, p); } }
         catch { break; }
@@ -271,8 +336,9 @@ export function createEngine({
       catch (e) { if (!/ 429/.test(e.message) || attempt >= 3) throw e; await sleep(500 * 2 ** attempt); }
     }
   }
-  async function jupiterQuote(inputMint, outputMint, amount, bot) {
-    const quote = await jupiterTrade(`${JUPITER}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${bot.slippageBps}&restrictIntermediateTokens=true`);
+  async function jupiterQuote(inputMint, outputMint, amount, bot, { priority = true } = {}) {
+    const url = `${JUPITER}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${bot.slippageBps}&restrictIntermediateTokens=true`;
+    const quote = priority ? await jupiterTrade(url) : await getJson(url);
     if (!quote?.outAmount || quote.outAmount === '0') throw new Error('No Jupiter route for this token.');
     return quote;
   }
@@ -280,8 +346,8 @@ export function createEngine({
     const impact = Number(quote.priceImpactPct || 0) * 100;
     if (bot.maxPriceImpactPct > 0 && impact > bot.maxPriceImpactPct) throw new Error(`price impact ${impact.toFixed(1)}% is over the ${bot.maxPriceImpactPct}% limit`);
   }
-  async function jupiterSwap(owner, inputMint, outputMint, amount, bot, { buying = false } = {}) {
-    const quote = await jupiterQuote(inputMint, outputMint, amount, bot);
+  async function jupiterSwap(owner, inputMint, outputMint, amount, bot, { buying = false, quote = null } = {}) {
+    quote ||= await jupiterQuote(inputMint, outputMint, amount, bot);
     if (buying) checkImpact(quote, bot);
     const { swapTransaction, lastValidBlockHeight } = await jupiterTrade(`${JUPITER}/swap`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -314,68 +380,114 @@ export function createEngine({
     await sendAndConfirm(tx, lastValidBlockHeight);
   }
 
+  const exitFee = bot => TX_FEE_SOL + (bot.priorityFeeSol || 0);
+  // What selling the whole position right now would return, after fees, from a real Jupiter quote.
+  async function sellValue(bot, position, { priority = true } = {}) {
+    const quote = await jupiterQuote(position.mint, SOL_MINT, position.tokenRaw, bot, { priority });
+    return { quote, valueSol: Number(quote.outAmount) / LAMPORTS_PER_SOL - exitFee(bot) };
+  }
+  function markValue(position, valueSol, spot, now) {
+    position.valueSol = valueSol;
+    position.valueSpot = spot > 0 ? spot : position.lastPrice;
+    position.valueAt = now;
+    position.multiple = ((position.realizedSol || 0) + valueSol) / position.sizeSol;
+    position.peakMultiple = Math.max(position.peakMultiple || 0, position.multiple);
+  }
+  // Between quotes, scale the last quoted value by how far the spot price has moved since.
+  function estimateMultiple(position) {
+    if (!(position.valueSol > 0)) return position.tokenRaw ? position.multiple ?? 1 : position.lastPrice / position.entryPrice;
+    const scale = position.valueSpot > 0 && position.lastPrice > 0 ? position.lastPrice / position.valueSpot : 1;
+    return ((position.realizedSol || 0) + position.valueSol * scale) / position.sizeSol;
+  }
+
   async function openPosition(bot, pair) {
     const price = Number(pair.priceNative);
     if (!(price > 0) || !(bot.maxPositionSol > 0)) return null;
+    const now = clock();
     const position = {
       id: randomUUID(), botId: bot.id, mode: bot.mode, mint: pair.baseToken.address,
       symbol: pair.baseToken.symbol || '?', pairUrl: pair.url || null, entryPrice: price,
-      lastPrice: price, peakPrice: price, sizeSol: bot.maxPositionSol, openedAt: iso()
+      lastPrice: price, sizeSol: bot.maxPositionSol, openedAt: iso()
     };
+    const fee = TX_FEE_SOL + (bot.priorityFeeSol || 0);
+    const lamports = Math.floor(bot.maxPositionSol * LAMPORTS_PER_SOL);
+    let owner, before;
     if (bot.mode === 'live') {
       if (!liveAllowed) return null;
-      const owner = getKeypair(bot);
-      const before = await connection.getBalance(owner.publicKey, 'confirmed');
-      const lamports = Math.floor(bot.maxPositionSol * LAMPORTS_PER_SOL);
+      owner = getKeypair(bot);
+      before = await connection.getBalance(owner.publicKey, 'confirmed');
       if (before < lamports + 0.01 * LAMPORTS_PER_SOL) { log('warn', `${bot.name}: wallet balance too low for a ${bot.maxPositionSol} SOL buy.`); return null; }
-      const { signature } = await jupiterSwap(owner, SOL_MINT, position.mint, lamports, bot, { buying: true });
+    } else if (bot.paperBalanceSol < bot.maxPositionSol + fee) return null;
+
+    // Check the token can be sold back, and what a buy-then-sell round trip costs, before buying.
+    // This catches tokens with no sell route (honeypots), transfer taxes and pools too thin to exit.
+    const buyQuote = await jupiterQuote(SOL_MINT, position.mint, lamports, bot);
+    checkImpact(buyQuote, bot);
+    const backQuote = await jupiterQuote(position.mint, SOL_MINT, buyQuote.outAmount, bot);
+    const roundTripPct = (1 - Number(backQuote.outAmount) / lamports) * 100;
+    if (bot.maxRoundTripPct > 0 && roundTripPct > bot.maxRoundTripPct) throw new Error(`buying and selling back would cost ${roundTripPct.toFixed(1)}% (limit ${bot.maxRoundTripPct}%)`);
+    if (!bot.enabled) return null; // paused while quoting
+
+    if (bot.mode === 'live') {
+      const { signature } = await jupiterSwap(owner, SOL_MINT, position.mint, lamports, bot, { buying: true, quote: buyQuote });
       const after = await connection.getBalance(owner.publicKey, 'confirmed');
       position.sizeSol = (before - after) / LAMPORTS_PER_SOL;
       position.buySignature = signature;
+      const raw = (await tokenHoldings(owner.publicKey, position.mint)).reduce((s, a) => s + a.raw, 0n);
+      position.tokenRaw = (raw > 0n ? raw : BigInt(buyQuote.otherAmountThreshold || buyQuote.outAmount)).toString();
     } else {
-      // Paper fills use a real Jupiter quote (route, price impact) plus network and priority fees,
-      // so paper results match what the same trade would have done live.
-      const fee = TX_FEE_SOL + (bot.priorityFeeSol || 0);
-      if (bot.paperBalanceSol < bot.maxPositionSol + fee) return null;
-      const quote = await jupiterQuote(SOL_MINT, position.mint, Math.floor(bot.maxPositionSol * LAMPORTS_PER_SOL), bot);
-      checkImpact(quote, bot);
-      position.tokenRaw = quote.outAmount;
-      position.tokens = Number(quote.outAmount) / 10 ** (decimals.get(position.mint) ?? 6);
+      // Paper fills use real Jupiter quotes plus network and priority fees, so paper results match
+      // what the same trade would have done live.
+      position.tokenRaw = buyQuote.outAmount;
       position.sizeSol = bot.maxPositionSol + fee;
       bot.paperBalanceSol -= position.sizeSol;
     }
-    // Exit rules compare against the same spot price feed the monitor uses. (P&L itself always comes
-    // from the SOL actually spent and received.)
+    position.tokens = Number(position.tokenRaw) / 10 ** (decimals.get(position.mint) ?? 6);
+    position.roundTripPct = roundTripPct;
+    // What the token looked like when bought, so the trade journal can show which signals win.
+    position.features = {
+      ageMin: pair.pairCreatedAt ? (now - pair.pairCreatedAt) / 60_000 : null, liquidityUsd: pair.liquidity?.usd ?? null,
+      buys5m: pair.txns?.m5?.buys ?? null, buySellRatio: (pair.txns?.m5?.buys || 0) / Math.max(pair.txns?.m5?.sells || 0, 1),
+      roundTripPct, priceImpactPct: Number(buyQuote.priceImpactPct || 0) * 100,
+      ...Object.fromEntries(AUDIT_KEYS.filter(k => k !== 'isSus').map(k => [k, pair[k] ?? null]))
+    };
     const spot = (await pricesFor([position.mint]).catch(() => new Map())).get(position.mint);
-    if (spot > 0) position.entryPrice = position.peakPrice = position.lastPrice = spot;
+    if (spot > 0) position.entryPrice = position.lastPrice = spot;
+    const scale = Number(position.tokenRaw) / Number(buyQuote.outAmount);
+    markValue(position, Number(backQuote.outAmount) * scale / LAMPORTS_PER_SOL - exitFee(bot), position.lastPrice, now);
+    position.peakMultiple = position.multiple;
     db.positions.push(position);
-    log('info', `${bot.name} bought ${position.symbol} for ${position.sizeSol.toFixed(4)} SOL (${bot.mode}).`);
+    log('info', `${bot.name} bought ${position.symbol} for ${position.sizeSol.toFixed(4)} SOL (${bot.mode}); worth ${position.valueSol.toFixed(4)} SOL if sold now.`);
     return position;
   }
 
-  async function closePosition(bot, position, reason, price = position.lastPrice) {
+  async function closePosition(bot, position, reason, { quote = null } = {}) {
     let exitSol;
     let sellSignature = null;
     if (position.mode === 'live') {
       const owner = getKeypair(bot);
       const before = await connection.getBalance(owner.publicKey, 'confirmed');
       const raw = (await tokenHoldings(owner.publicKey, position.mint)).reduce((s, a) => s + a.raw, 0n);
-      if (raw > 0n) sellSignature = (await jupiterSwap(owner, position.mint, SOL_MINT, raw.toString(), bot)).signature;
+      if (raw > 0n) sellSignature = (await jupiterSwap(owner, position.mint, SOL_MINT, raw.toString(), bot, { quote: quote && String(raw) === quote.inAmount ? quote : null })).signature;
       await reclaimRent(owner, await tokenHoldings(owner.publicKey, position.mint)).catch(e => log('warn', `${bot.name}: could not close empty ${position.symbol} account: ${e.message}`));
       const after = await connection.getBalance(owner.publicKey, 'confirmed');
       exitSol = (after - before) / LAMPORTS_PER_SOL;
+    } else if (position.tokenRaw === '0') {
+      exitSol = 0;
     } else if (position.tokenRaw) {
-      const quote = await jupiterQuote(position.mint, SOL_MINT, position.tokenRaw, bot);
-      exitSol = Number(quote.outAmount) / LAMPORTS_PER_SOL - TX_FEE_SOL - (bot.priorityFeeSol || 0);
+      quote ||= (await sellValue(bot, position)).quote;
+      exitSol = Number(quote.outAmount) / LAMPORTS_PER_SOL - exitFee(bot);
       bot.paperBalanceSol += exitSol;
     } else {
-      exitSol = position.tokens * price * 0.99; // paper positions opened before quote-based fills
+      exitSol = position.tokens * position.lastPrice * 0.99; // paper positions opened before quote-based fills
       bot.paperBalanceSol += exitSol;
     }
+    exitSol += position.realizedSol || 0; // SOL already banked by a partial sell
     const pnlSol = exitSol - position.sizeSol;
     const trade = {
       id: randomUUID(), botId: bot.id, mode: position.mode, mint: position.mint, symbol: position.symbol,
-      entrySol: position.sizeSol, exitSol, pnlSol, multiple: price / position.entryPrice, reason,
+      entrySol: position.sizeSol, exitSol, pnlSol, multiple: exitSol / position.sizeSol, reason,
+      partialSol: position.realizedSol || 0, features: position.features || null,
       openedAt: position.openedAt, closedAt: iso(),
       buySignature: position.buySignature || null, sellSignature
     };
@@ -388,24 +500,87 @@ export function createEngine({
     return trade;
   }
 
-  // Back off after a failed sell; after 5 failures in a row (usually a rug with no liquidity left),
-  // book the position as a total loss so the bot stops retrying. Any tokens stay in the wallet.
+  // Back off after a failed sell. Routes often vanish for a few minutes (e.g. a pump.fun token moving to
+  // its AMM), so a position is only booked as a total loss after 8 failures spread over 10+ minutes.
+  // Any tokens stay in the wallet.
   function sellFailed(bot, position, error, now) {
     position.sellFailures = (position.sellFailures || 0) + 1;
+    position.firstSellFailureAt ||= now;
     position.nextSellAt = now + Math.min(60_000, 2_000 * 2 ** position.sellFailures);
     log('error', `${bot.name}: sell of ${position.symbol} failed (attempt ${position.sellFailures}): ${error.message}`);
-    if (position.sellFailures < 5) return;
+    if (position.sellFailures < 8 || now - position.firstSellFailureAt < 10 * 60_000) return;
     db.trades.push({
       id: randomUUID(), botId: bot.id, mode: position.mode, mint: position.mint, symbol: position.symbol,
-      entrySol: position.sizeSol, exitSol: 0, pnlSol: -position.sizeSol, multiple: 0, reason: 'unsellable',
+      entrySol: position.sizeSol, exitSol: position.realizedSol || 0, pnlSol: (position.realizedSol || 0) - position.sizeSol,
+      multiple: (position.realizedSol || 0) / position.sizeSol, reason: 'unsellable', partialSol: position.realizedSol || 0, features: position.features || null,
       openedAt: position.openedAt, closedAt: iso(), buySignature: position.buySignature || null, sellSignature: null
     });
     db.positions = db.positions.filter(p => p.id !== position.id);
-    bot.stats.trades += 1; bot.stats.losses += 1; bot.stats.realizedPnlSol -= position.sizeSol;
-    log('warn', `${bot.name}: wrote off ${position.symbol} as unsellable (-${position.sizeSol.toFixed(4)} SOL). Tokens left in the wallet.`);
+    const lost = position.sizeSol - (position.realizedSol || 0);
+    bot.stats.trades += 1; bot.stats.losses += 1; bot.stats.realizedPnlSol -= lost;
+    log('warn', `${bot.name}: wrote off ${position.symbol} as unsellable (-${lost.toFixed(4)} SOL). Tokens left in the wallet.`);
+  }
+
+  // Sell part of a position and bank the SOL; the rest keeps running.
+  async function sellPart(bot, position, now) {
+    const pct = BigInt(Math.round(bot.partialSellPercent));
+    let got;
+    if (position.mode === 'live') {
+      const owner = getKeypair(bot);
+      const before = await connection.getBalance(owner.publicKey, 'confirmed');
+      const raw = (await tokenHoldings(owner.publicKey, position.mint)).reduce((s, a) => s + a.raw, 0n);
+      const amount = raw * pct / 100n;
+      if (amount <= 0n) return;
+      await jupiterSwap(owner, position.mint, SOL_MINT, amount.toString(), bot);
+      got = (await connection.getBalance(owner.publicKey, 'confirmed') - before) / LAMPORTS_PER_SOL;
+      position.tokenRaw = (await tokenHoldings(owner.publicKey, position.mint)).reduce((s, a) => s + a.raw, 0n).toString();
+    } else {
+      const amount = BigInt(position.tokenRaw) * pct / 100n;
+      if (amount <= 0n) return;
+      const quote = await jupiterQuote(position.mint, SOL_MINT, amount.toString(), bot);
+      got = Number(quote.outAmount) / LAMPORTS_PER_SOL - exitFee(bot);
+      bot.paperBalanceSol += got;
+      position.tokenRaw = (BigInt(position.tokenRaw) - amount).toString();
+    }
+    position.realizedSol = (position.realizedSol || 0) + got;
+    position.partialDone = true;
+    position.valueSol = position.valueSol * (100 - Number(pct)) / 100;
+    position.multiple = (position.realizedSol + position.valueSol) / position.sizeSol;
+    log('info', `${bot.name} banked ${pct}% of ${position.symbol} at ${position.multiple.toFixed(2)}x: +${got.toFixed(4)} SOL back, the rest keeps running.`);
+  }
+
+  // Check one position against its exit rules and sell if one triggers. The spot price only decides
+  // when to look closer: every exit is confirmed with a real sell quote first.
+  async function managePosition(bot, position, now) {
+    if (position.nextSellAt && now < position.nextSellAt) return;
+    const timeUp = now - Date.parse(position.openedAt) >= bot.maxHoldMinutes * 60_000;
+    const est = estimateMultiple(position);
+    // Within 5% of take profit counts as a hint too, so a fast spike is confirmed and sold without waiting.
+    const hint = exitReason(position, bot, est, now) || (partialDue(position, bot, est) ? 'partial' : null) ||
+      (est >= bot.takeProfitMultiplier * 0.95 ? 'near_target' : null);
+    const stale = !position.valueAt || now - position.valueAt >= REVALUE_MS;
+    if (!hint && !timeUp && !stale) return;
+    if (!position.tokenRaw) {
+      if (hint && hint !== 'partial' && hint !== 'near_target') await closePosition(bot, position, hint);
+      return;
+    }
+    let quote = null;
+    try {
+      const v = await sellValue(bot, position, { priority: Boolean(hint || timeUp) });
+      quote = v.quote;
+      markValue(position, v.valueSol, position.lastPrice, now);
+    } catch (e) {
+      if (/budget/.test(e.message)) return; // background re-quote skipped; try again next tick
+      if (hint || timeUp) throw e;
+      return;
+    }
+    const reason = exitReason(position, bot, position.multiple, now);
+    if (reason) await closePosition(bot, position, reason, { quote: position.mode === 'paper' ? quote : null });
+    else if (partialDue(position, bot, position.multiple)) await sellPart(bot, position, now);
   }
 
   // Fast loop: price every open position and sell the moment an exit rule triggers.
+  let lastPriceAt = 0;
   async function monitor() {
     if (monitoring) return;
     monitoring = true;
@@ -414,17 +589,15 @@ export function createEngine({
       // Positions are managed even for paused bots so nothing is left unattended.
       const open = db.positions.filter(p => db.bots.some(b => b.id === p.botId));
       if (open.length) {
-        const prices = await pricesFor([...new Set(open.map(p => p.mint))]);
-        const exits = [];
-        for (const position of open) {
-          const bot = db.bots.find(b => b.id === position.botId);
-          const price = prices.get(position.mint);
-          if (price > 0) { position.lastPrice = price; position.peakPrice = Math.max(position.peakPrice || position.entryPrice, position.lastPrice); }
-          if (position.nextSellAt && now < position.nextSellAt) continue;
-          const reason = exitReason(position, bot, position.lastPrice, now);
-          if (reason) exits.push(withWallet(bot, () => closePosition(bot, position, reason)).catch(e => sellFailed(bot, position, e, now)));
+        if (now - lastPriceAt >= PRICE_MS) {
+          lastPriceAt = now;
+          const prices = await pricesFor([...new Set(open.map(p => p.mint))]);
+          for (const position of open) { const price = prices.get(position.mint); if (price > 0) position.lastPrice = price; }
         }
-        await Promise.all(exits);
+        await Promise.all(open.map(position => {
+          const bot = db.bots.find(b => b.id === position.botId);
+          return withWallet(bot, () => db.positions.includes(position) && managePosition(bot, position, now)).catch(e => sellFailed(bot, position, e, now));
+        }));
         await save();
       }
       for (const bot of db.bots.filter(b => b.enabled)) {
@@ -445,6 +618,10 @@ export function createEngine({
     }
   }
 
+  // Tokens that failed a buy check are skipped for a while instead of being re-quoted every scan.
+  const rejected = new Map(); // mint -> retry after
+  const skips = {};
+  let lastSummaryAt = clock();
   // Slower loop: refresh the watchlist and buy anything that passes a bot's filters.
   async function scan() {
     if (scanning) return;
@@ -463,13 +640,27 @@ export function createEngine({
           if (!bot.enabled || db.positions.filter(p => p.botId === bot.id).length >= bot.maxOpenPositions) break;
           if (db.positions.some(p => p.botId === bot.id && p.mint === mint)) continue;
           if (db.trades.some(t => t.botId === bot.id && t.mint === mint)) continue;
-          if (passesFilters(pair, bot, now).length) continue;
-          if (!(await mintIsSafe(mint).catch(() => false))) continue;
-          try { if (await withWallet(bot, () => openPosition(bot, pair))) bought = true; } catch (e) { log('error', `${bot.name}: buy of ${pair.baseToken?.symbol} failed: ${e.message}`); }
+          if ((rejected.get(mint) || 0) > now) continue;
+          const failed = passesFilters(pair, bot, now);
+          if (failed.length) { skips[failed[0]] = (skips[failed[0]] || 0) + 1; continue; }
+          if (!(await mintIsSafe(mint).catch(() => false))) { skips.mint_authority = (skips.mint_authority || 0) + 1; continue; }
+          try { if (await withWallet(bot, () => openPosition(bot, pair))) bought = true; }
+          catch (e) {
+            rejected.set(mint, now + (/ 429|budget/.test(e.message) ? 30_000 : 5 * 60_000));
+            const key = /round trip|selling back/.test(e.message) ? 'round_trip' : /impact/.test(e.message) ? 'price_impact' : /route/.test(e.message) ? 'no_route' : 'error';
+            skips[key] = (skips[key] || 0) + 1;
+            if (key === 'error') log('error', `${bot.name}: buy of ${pair.baseToken?.symbol} failed: ${e.message}`);
+          }
         }
       }
       for (const bot of db.bots) if (bot.enabled) bot.status = `Running · ${bot.mode}`;
       if (bought) await save();
+      if (now - lastSummaryAt >= 60_000) {
+        health.skips = { ...skips };
+        log('info', `Scan: watching ${health.watching} tokens. Skipped in the last minute: ${Object.entries(skips).map(([k, n]) => `${k.replace('_', ' ')} ${n}`).join(', ') || 'none'}.`);
+        for (const k of Object.keys(skips)) delete skips[k];
+        lastSummaryAt = now;
+      }
     } catch (e) {
       health.lastError = e.message;
       log('error', `Market scan failed: ${e.message}`);
@@ -489,7 +680,7 @@ export function createEngine({
       tick();
     },
     stop() { timers.splice(0).forEach(clearInterval); },
-    tick, monitor, scan, health, liveAllowed, jupiterSwap,
-    closePosition: (bot, position, reason) => withWallet(bot, () => closePosition(bot, position, reason))
+    tick, monitor, scan, health, liveAllowed, jupiterSwap, estimateMultiple,
+    closePosition: (bot, position, reason) => withWallet(bot, () => db.positions.includes(position) ? closePosition(bot, position, reason) : null)
   };
 }
