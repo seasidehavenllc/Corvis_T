@@ -232,7 +232,7 @@ function validateBotSettings(body, current = {}) {
   const stopLossPercent = Number(body?.stopLossPercent ?? current.stopLossPercent ?? 15);
   const maxPositionSol = Number(body?.maxPositionSol ?? current.maxPositionSol ?? 0.05);
   if (!name) return { error: 'Bot name is required.' };
-  if (!(takeProfitMultiplier > 1 && takeProfitMultiplier <= 10)) return { error: 'Take profit multiplier must be greater than 1 and at most 10.' };
+  if (!(takeProfitMultiplier > 1 && takeProfitMultiplier <= 10)) return { error: 'Sell-all profit target must be above 0% and at most 900%.' };
   if (!(stopLossPercent > 0 && stopLossPercent <= 100)) return { error: 'Stop loss must be between 0 and 100%.' };
   if (!(maxPositionSol > 0 && maxPositionSol <= 10)) return { error: 'Max position must be greater than 0 and at most 10 SOL.' };
   const pick = key => Number(body?.[key] ?? current[key] ?? STRATEGY_DEFAULTS[key]);
@@ -252,7 +252,7 @@ function validateBotSettings(body, current = {}) {
   }
   if (!(Number.isInteger(strategy.maxDevLaunches) && strategy.maxDevLaunches >= 0)) return { error: 'Dev launches limit must be a whole number, 0 (off) or more.' };
   if (!(strategy.minPairAgeMinutes >= 0 && strategy.minPairAgeMinutes < strategy.maxPairAgeMinutes)) return { error: 'Minimum pair age must be 0 or more and below the maximum age.' };
-  if (strategy.partialSellPercent > 0 && !(strategy.partialTakeProfitMultiplier > 1 && strategy.partialTakeProfitMultiplier < takeProfitMultiplier)) return { error: 'The first target must be above 1× and below the final take profit.' };
+  if (strategy.partialSellPercent > 0 && !(strategy.partialTakeProfitMultiplier > 1 && strategy.partialTakeProfitMultiplier < takeProfitMultiplier)) return { error: 'The first target must be above 0% and below the sell-all target.' };
   if (!(strategy.maxRoundTripPct >= 0 && strategy.maxRoundTripPct <= 100)) return { error: 'Max round-trip cost must be 0 (off) to 100%.' };
   if (!(Number.isInteger(strategy.minHolders) && strategy.minHolders >= 0)) return { error: 'Minimum holders must be a whole number, 0 or more.' };
   if (!(strategy.maxTopHoldersPct >= 0 && strategy.maxTopHoldersPct <= 100)) return { error: 'Top holders limit must be 0 (off) to 100%.' };

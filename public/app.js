@@ -95,7 +95,7 @@ function renderBots() {
         <div class="stat"><b>${b.openPositions}/${b.maxOpenPositions}</b><span>Open</span></div>
       </div>
       <div class="chips">
-        ${b.partialSellPercent > 0 ? `<span class="chip">bank ${esc(b.partialSellPercent)}% @ ${esc(b.partialTakeProfitMultiplier)}×</span>` : ''}<span class="chip">TP ${esc(b.takeProfitMultiplier)}×</span><span class="chip">SL ${esc(b.stopLossPercent)}%</span>
+        ${b.partialSellPercent > 0 ? `<span class="chip">bank ${esc(b.partialSellPercent)}% at ${gain(b.partialTakeProfitMultiplier)}</span>` : ''}<span class="chip">sell all at ${gain(b.takeProfitMultiplier)}</span><span class="chip">SL ${esc(b.stopLossPercent)}%</span>
         <span class="chip">${esc(b.maxPositionSol)} SOL/trade</span><span class="chip">liq ≥ $${Number(b.minLiquidityUsd).toLocaleString()}</span>
         <span class="chip">age ≤ ${esc(b.maxPairAgeMinutes)}m</span><span class="chip">hold ≤ ${esc(b.maxHoldMinutes)}m</span>
         ${b.trailingStopPercent ? `<span class="chip">trail ${esc(b.trailingStopPercent)}%</span>` : ''}
@@ -147,6 +147,9 @@ function renderSide() {
 
 // ---------- bot form ----------
 const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl: 'stopLossPercent', fHold: 'maxHoldMinutes', fMax: 'maxPositionSol', fOpen: 'maxOpenPositions', fLoss: 'maxDailyLossSol', fLiq: 'minLiquidityUsd', fAge: 'maxPairAgeMinutes', fBuys: 'minBuys5m', fSlip: 'slippageBps', fTrail: 'trailingStopPercent', fRatio: 'minBuySellRatio', fPrio: 'priorityFeeSol', fImpact: 'maxPriceImpactPct', fRound: 'maxRoundTripPct', fHolders: 'minHolders', fTop: 'maxTopHoldersPct', fPartTp: 'partialTakeProfitMultiplier', fPartPct: 'partialSellPercent', fDev: 'maxDevHoldingPct', fDevMints: 'maxDevLaunches', fOrganic: 'minOrganicScore', fMinAge: 'minPairAgeMinutes' };
+// Profit targets are entered as a % gain (50 = +50%) and stored as a multiple (1.5×).
+const GAIN_FIELDS = new Set(['fTp', 'fPartTp']);
+const gain = m => `+${+((m - 1) * 100).toFixed(1)}%`;
 const REASONS = { take_profit: 'take profit', stop_loss: 'stop loss', trailing_stop: 'trailing stop', max_hold: 'time limit', protect_profit: 'kept profit', unsellable: 'unsellable', manual: 'sold by you' };
 const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.5, stopLossPercent: 15, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 8000, maxPairAgeMinutes: 30, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.2, priorityFeeSol: 0.0003, maxPriceImpactPct: 8, maxRoundTripPct: 6, minHolders: 40, maxTopHoldersPct: 35, partialTakeProfitMultiplier: 1.3, partialSellPercent: 50, maxDevHoldingPct: 10, maxDevLaunches: 20, minOrganicScore: 0, minPairAgeMinutes: 0 };
 function requireUnlock() { if (adminToken) return true; $('#unlockDialog').showModal(); return false; }
@@ -155,7 +158,10 @@ function openBotForm(bot) {
   editingBotId = bot?.id || null;
   $('#botDialogTitle').textContent = bot ? `Edit ${bot.name}` : 'New bot';
   $('#botSubmit').textContent = bot ? 'Save changes' : 'Create bot';
-  for (const [id, key] of Object.entries(fields)) $(`#${id}`).value = (bot || defaults)[key] ?? defaults[key];
+  for (const [id, key] of Object.entries(fields)) {
+    const v = (bot || defaults)[key] ?? defaults[key];
+    $(`#${id}`).value = GAIN_FIELDS.has(id) ? +((v - 1) * 100).toFixed(2) : v;
+  }
   feeHint();
   $('#botDialog').showModal();
 }
@@ -172,7 +178,10 @@ $('#botForm').addEventListener('submit', async e => {
   if (e.submitter?.value !== 'save') return;
   e.preventDefault();
   const body = {};
-  for (const [id, key] of Object.entries(fields)) body[key] = id === 'fName' || id === 'fMode' ? $(`#${id}`).value : Number($(`#${id}`).value);
+  for (const [id, key] of Object.entries(fields)) {
+    const v = $(`#${id}`).value;
+    body[key] = id === 'fName' || id === 'fMode' ? v : GAIN_FIELDS.has(id) ? 1 + Number(v) / 100 : Number(v);
+  }
   try {
     if (editingBotId) await api(`/api/bots/${encodeURIComponent(editingBotId)}`, { method: 'PATCH', body: JSON.stringify(body) });
     else { const bot = await post('/api/bots', body); toast(`Created ${bot.name}. Wallet ${short(bot.walletAddress)}`); }
