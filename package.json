@@ -1,13 +1,13 @@
 {
   "name": "corvis-trading",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
-  "description": "Corvis Trading dashboard with encrypted Solana bot wallets and guarded dev-wallet transfer policy",
+  "description": "Corvis Trading: Solana sniper bot dashboard with paper and live (Jupiter) trading",
   "type": "module",
   "engines": { "node": ">=20" },
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check public/app.js",
+    "check": "node --check server.js && node --check engine.js && node --check public/app.js",
     "test": "node --test"
   },
   "dependencies": {

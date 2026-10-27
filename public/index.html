@@ -5,12 +5,117 @@
 <title>Corvis Trading</title><link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<header><div><div class="brand">CORVIS <span>TRADING</span></div><div class="muted">Solana bot dashboard</div></div><span id="mode" class="pill">Loading status…</span></header>
-<main>
-<section class="panel"><h2>Transfer policy</h2><p><b>Dev wallet:</b> <code id="devWallet">Loading…</code></p><p>10% of <b>positive realized profit only</b>. Explicit bot sweeps send remaining SOL (less fee reserve) and standard SPL token balances to the dev wallet.</p><p class="warning">Live swaps and token-sniping are not implemented in this build. Transfer functions are disabled by default and require server-side environment flags.</p><div id="policy"></div></section>
-<section class="panel"><h2>Admin access</h2><label>Admin API token <input id="token" type="password" autocomplete="off" placeholder="Enter ADMIN_API_TOKEN"></label><button id="saveToken">Use token for this page</button><p class="muted">Token is held in page memory only and is not saved to local storage.</p></section>
-<section class="panel"><h2>Create bot wallet</h2><label>Bot name <input id="botName" maxlength="40" placeholder="My bot"></label><div class="row"><label>Take profit multiplier <input id="tp" type="number" min="1.01" max="10" step=".01" value="1.45"></label><label>Stop loss % <input id="sl" type="number" min=".1" max="100" value="15"></label><label>Max position SOL <input id="maxPos" type="number" min=".001" max="10" step=".001" value=".05"></label></div><button id="createBot">Create paused bot</button></section>
-<section class="panel"><h2>Bot wallets</h2><div id="bots">Loading bots…</div></section>
-<section class="panel"><h2>Recent events</h2><div id="events" class="muted">Loading…</div></section>
-</main><script src="/app.js" defer></script>
+<header class="topbar">
+  <div class="brand">CORVIS <span>TRADING</span></div>
+  <div class="topbar-right">
+    <span id="network" class="pill">…</span>
+    <span id="mode" class="pill pill-warn">PAPER</span>
+    <button id="unlock" class="btn btn-ghost" type="button">🔒 Unlock</button>
+  </div>
+</header>
+
+<main class="wrap">
+  <div id="alerts"></div>
+
+  <section class="kpis">
+    <div class="kpi"><div class="kpi-label">Bots</div><div class="kpi-value" id="kBots">–</div></div>
+    <div class="kpi"><div class="kpi-label">SOL in bot wallets</div><div class="kpi-value" id="kBalance">–</div></div>
+    <div class="kpi"><div class="kpi-label">Realized P&amp;L</div><div class="kpi-value" id="kPnl">–</div></div>
+    <div class="kpi"><div class="kpi-label">Win rate</div><div class="kpi-value" id="kWin">–</div><div class="kpi-sub" id="kTrades"></div></div>
+    <div class="kpi"><div class="kpi-label">Open positions</div><div class="kpi-value" id="kOpen">–</div><div class="kpi-sub" id="kEngine"></div></div>
+  </section>
+
+  <div class="layout">
+    <section class="col-main">
+      <div class="section-head">
+        <h2>Bots</h2>
+        <button id="newBot" class="btn btn-primary" type="button">+ New bot</button>
+      </div>
+      <div id="bots" class="bot-grid"><p class="muted">Loading bots…</p></div>
+
+      <div class="section-head"><h2>Open positions</h2></div>
+      <div class="card table-card"><div id="positions"><p class="muted">No open positions.</p></div></div>
+
+      <div class="section-head"><h2>Recent trades</h2></div>
+      <div class="card table-card"><div id="trades"><p class="muted">No trades yet.</p></div></div>
+    </section>
+
+    <aside class="col-side">
+      <div class="card">
+        <h3>Treasury</h3>
+        <div id="treasury" class="muted">Loading…</div>
+        <form id="withdrawForm" class="stack hidden">
+          <label>Destination address <input id="wTo" required autocomplete="off"></label>
+          <label>Amount (SOL) <input id="wAmount" type="number" min="0.000001" step="0.000001" required></label>
+          <label class="check"><input id="wConfirm" type="checkbox"> I understand this transfer is irreversible</label>
+          <button class="btn btn-primary" type="submit">Withdraw</button>
+        </form>
+      </div>
+      <div class="card">
+        <h3>Fees &amp; sweeps</h3>
+        <div id="policy" class="muted">Loading…</div>
+      </div>
+      <div class="card">
+        <h3>Activity</h3>
+        <div id="events" class="feed muted">Loading…</div>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<dialog id="botDialog">
+  <form id="botForm" method="dialog" class="stack">
+    <h3 id="botDialogTitle">New bot</h3>
+    <label>Name <input id="fName" maxlength="40" required placeholder="Sniper #1"></label>
+    <label>Mode
+      <select id="fMode"><option value="paper">Paper (simulated trades on live prices)</option><option value="live">Live (real SOL via Jupiter)</option></select>
+    </label>
+    <h4>Exits</h4>
+    <div class="row3">
+      <label>Take profit (×) <input id="fTp" type="number" min="1.01" max="10" step=".01" value="1.45" required></label>
+      <label>Stop loss (%) <input id="fSl" type="number" min=".1" max="100" step=".1" value="15" required></label>
+      <label>Max hold (min) <input id="fHold" type="number" min="1" max="10080" step="1" value="60" required></label>
+    </div>
+    <h4>Sizing &amp; risk</h4>
+    <div class="row3">
+      <label>Position size (SOL) <input id="fMax" type="number" min=".001" max="10" step=".001" value=".05" required></label>
+      <label>Max open positions <input id="fOpen" type="number" min="1" max="20" step="1" value="3" required></label>
+      <label>Daily loss limit (SOL) <input id="fLoss" type="number" min=".001" step=".001" value=".2" required></label>
+    </div>
+    <h4>Entry filters</h4>
+    <div class="row3">
+      <label>Min liquidity (USD) <input id="fLiq" type="number" min="0" step="100" value="5000" required></label>
+      <label>Max pair age (min) <input id="fAge" type="number" min="1" max="10080" step="1" value="30" required></label>
+      <label>Min buys (last 5m) <input id="fBuys" type="number" min="0" step="1" value="10" required></label>
+    </div>
+    <label>Slippage (bps) <input id="fSlip" type="number" min="10" max="5000" step="10" value="300" required></label>
+    <p class="muted small">Tokens are skipped unless mint and freeze authority are revoked. Each bot has its own encrypted wallet; you can withdraw or export its key at any time.</p>
+    <div class="actions">
+      <button class="btn btn-ghost" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn btn-primary" id="botSubmit" value="save">Create bot</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="detailDialog">
+  <div class="stack">
+    <div class="section-head"><h3 id="dTitle">Bot</h3><button class="btn btn-ghost" id="dClose" type="button">Close</button></div>
+    <div id="dBody"></div>
+  </div>
+</dialog>
+
+<dialog id="unlockDialog">
+  <form id="unlockForm" method="dialog" class="stack">
+    <h3>Admin access</h3>
+    <label>Admin API token <input id="token" type="password" autocomplete="off" placeholder="ADMIN_API_TOKEN"></label>
+    <p class="muted small">Kept in this tab's memory only. Needed to create, edit, sweep, delete and withdraw.</p>
+    <div class="actions">
+      <button class="btn btn-ghost" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn btn-primary" value="save">Unlock</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/app.js" defer></script>
 </body></html>

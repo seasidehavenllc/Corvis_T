@@ -17,3 +17,18 @@ services:
         value: 20
       - key: DATA_DIR
         value: /var/data
+      - key: SOLANA_NETWORK
+        value: devnet
+      - key: SOLANA_RPC_URL
+        value: https://api.devnet.solana.com
+      - key: ADMIN_API_TOKEN
+        generateValue: true
+      # Set by hand: output of `openssl rand -hex 32`. Back it up; losing it locks every bot wallet.
+      - key: WALLET_ENCRYPTION_KEY
+        sync: false
+      - key: ENABLE_LIVE_TRADING
+        value: "false"
+      - key: ENABLE_DEV_FEE_TRANSFERS
+        value: "false"
+      - key: ENABLE_LIVE_SWEEP
+        value: "false"

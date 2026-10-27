@@ -1,6 +1,6 @@
-# Venue adapter plan
+# Venue adapters
 
-This starter deliberately includes no live trading implementation.
+Jupiter is implemented in `engine.js` (quote → swap → sign → confirm). Possible next adapters:
 
 Recommended integration order:
 1. **Jupiter Swap API** for supported routed swaps on Solana. Review current API docs, key/rate limits, transaction signing, slippage, and execution requirements. Verify whether the exact token/market is routable before placing any order.
