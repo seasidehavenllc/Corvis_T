@@ -32,8 +32,8 @@ const DEX_PRICE_MS = 1_000; // DexScreener price refresh for open positions
 // pump.fun bonding curves are read straight from the chain every tick, the fastest price there is.
 const PUMP_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 const HOLDER_MS = 1_500; // how often the biggest wallets of open positions are re-read for rug signs
-const WATCHED_WALLETS = 10; // biggest wallets watched per position, plus the coin's creator
-const MIN_WATCHED_PCT = 0.5; // ...when they hold at least this much of the supply
+const WATCHED_WALLETS = 20; // biggest wallets watched per position, plus the coin's creator
+const MIN_WATCHED_PCT = 0.1; // ...when they hold at least this much of the supply (bundles spread a dump over many small wallets)
 
 export const STRATEGY_DEFAULTS = {
   mode: 'paper',
@@ -60,6 +60,7 @@ export const STRATEGY_DEFAULTS = {
   partialTakeProfitMultiplier: 1.15,
   partialSellPercent: 50,
   maxSingleHolderPct: 10,
+  maxLiquidityPerHolderUsd: 150,
   insiderSellPct: 2,
   priorityFeeSol: 0.0003,
   maxDailyLossSol: 0.2,
@@ -98,6 +99,9 @@ export function passesFilters(pair, bot, now = Date.now()) {
   if (bot.minOrganicScore > 0 && pair.organicScore != null && pair.organicScore < bot.minOrganicScore) reasons.push('organic');
   // Liquidity leaving the pool in the last 5 minutes is how a rug starts: insiders pulling out or dumping.
   if (pair.liquidityChange5m != null && pair.liquidityChange5m <= -LIQUIDITY_DROP_PCT) reasons.push('liquidity_falling');
+  // A young pool holding far more money than its holder count explains was seeded by its creator, who can
+  // pull it back out at any time. Real launches build liquidity from many small buyers.
+  if (bot.maxLiquidityPerHolderUsd > 0 && pair.holders > 0 && (pair.liquidity?.usd || 0) / pair.holders > bot.maxLiquidityPerHolderUsd) reasons.push('seeded_pool');
   if (buys < bot.minBuys5m) reasons.push('buys');
   // Holder spread (from Jupiter's token data; skipped when a feed doesn't report it).
   if (bot.minHolders > 0 && pair.holders != null && pair.holders < bot.minHolders) reasons.push('holders');
