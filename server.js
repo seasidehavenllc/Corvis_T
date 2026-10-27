@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID, createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import {
-  Connection, Keypair, PublicKey, SystemProgram, Transaction,
+  Connection, Keypair, PublicKey, SystemProgram, Transaction, ComputeBudgetProgram,
   LAMPORTS_PER_SOL, sendAndConfirmTransaction
 } from '@solana/web3.js';
 import {
@@ -162,12 +162,26 @@ function requirePublicKey(value, label = 'address') {
   try { return new PublicKey(value); } catch { throw new Error(`Invalid Solana ${label}.`); }
 }
 function getDevWallet() { return requirePublicKey(DEV_WALLET_ADDRESS, 'dev wallet address'); }
+// Solana refuses transfers that would leave either wallet holding SOL but less than the rent-exempt
+// minimum (about 0.00089 SOL), so those are rejected here with a clear message instead.
+const RENT_EXEMPT_LAMPORTS = 890_880;
+const TRANSFER_PRIORITY_MICROLAMPORTS = 200_000; // ~0.0000001 SOL extra so transfers land when the network is busy
 async function transferSol(from, to, lamports, feeReserve = 10000) {
   const balance = await connection.getBalance(from.publicKey, 'confirmed');
-  const amount = Math.min(lamports, balance - feeReserve);
+  let amount = Math.min(lamports, balance - feeReserve);
   if (!Number.isSafeInteger(amount) || amount <= 0) return null;
-  const tx = new Transaction().add(SystemProgram.transfer({ fromPubkey: from.publicKey, toPubkey: to, lamports: amount }));
-  const signature = await sendAndConfirmTransaction(connection, tx, [from], { commitment: 'confirmed' });
+  const left = balance - feeReserve - amount;
+  if (left > 0 && left < RENT_EXEMPT_LAMPORTS) {
+    if (lamports >= Number.MAX_SAFE_INTEGER) amount = balance - feeReserve;
+    else throw new Error(`That would leave ${(left / LAMPORTS_PER_SOL).toFixed(6)} SOL behind, below Solana's 0.00089 SOL minimum. Send a little less, or use Withdraw all.`);
+  }
+  const destinationBalance = await connection.getBalance(to, 'confirmed');
+  if (destinationBalance === 0 && amount < RENT_EXEMPT_LAMPORTS) throw new Error('The destination wallet is empty, so Solana needs at least 0.00089 SOL to open it. Send more.');
+  const tx = new Transaction()
+    .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000 }))
+    .add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: TRANSFER_PRIORITY_MICROLAMPORTS }))
+    .add(SystemProgram.transfer({ fromPubkey: from.publicKey, toPubkey: to, lamports: amount }));
+  const signature = await sendAndConfirmTransaction(connection, tx, [from], { commitment: 'confirmed', maxRetries: 5 });
   return { signature, lamports: amount, amountSol: amount / LAMPORTS_PER_SOL };
 }
 async function sweepSplTokens(owner, destination) {
@@ -367,7 +381,8 @@ app.post('/api/bots/:id/withdraw', requireAdmin, async (req, res) => {
     const all = req.body?.all === true;
     const amountSol = Number(req.body?.amountSol);
     if (!all && !(Number.isFinite(amountSol) && amountSol > 0)) return res.status(400).json({ error: 'Enter a SOL amount or choose withdraw all.' });
-    const transfer = await transferSol(botKeypair(bot), to, all ? Number.MAX_SAFE_INTEGER : Math.floor(amountSol * LAMPORTS_PER_SOL), 5000);
+    if (to.equals(botKeypair(bot).publicKey)) return res.status(400).json({ error: 'That is the bot\'s own wallet. Enter your own wallet address.' });
+    const transfer = await transferSol(botKeypair(bot), to, all ? Number.MAX_SAFE_INTEGER : Math.floor(amountSol * LAMPORTS_PER_SOL), 5_200);
     if (!transfer) return res.status(400).json({ error: 'Bot wallet balance is too low to cover the amount and network fee.' });
     db.withdrawals.push({ at: new Date().toISOString(), from: bot.walletAddress, botId: bot.id, to: to.toBase58(), amountSol: transfer.amountSol, signature: transfer.signature });
     await saveDb(); log('info', `${transfer.amountSol} SOL withdrawn from ${bot.name}.`);
