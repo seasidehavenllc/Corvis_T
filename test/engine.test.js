@@ -12,8 +12,8 @@ function pair(overrides = {}) {
     pairCreatedAt: now - 5 * 60_000, ...overrides
   };
 }
-// Most tests buy a one-minute-old coin, so the fixture bot allows that; the defaults wait 5 minutes.
-const bot = { ...STRATEGY_DEFAULTS, minPairAgeMinutes: 0, id: 'b1', name: 'Test', enabled: true, takeProfitMultiplier: 1.5, stopLossPercent: 20, maxPositionSol: 0.1, stats: { trades: 0, wins: 0, losses: 0, realizedPnlSol: 0, feesSol: 0 } };
+// Most tests buy a one-minute-old coin at once, so the fixture bot allows that; the defaults wait 10 minutes and for a breakout.
+const bot = { ...STRATEGY_DEFAULTS, minPairAgeMinutes: 0, breakoutPct: 0, id: 'b1', name: 'Test', enabled: true, takeProfitMultiplier: 1.5, stopLossPercent: 20, maxPositionSol: 0.1, stats: { trades: 0, wins: 0, losses: 0, realizedPnlSol: 0, feesSol: 0 } };
 
 test('bestSolPairs keeps the most liquid SOL-quoted pair per token', () => {
   const best = bestSolPairs([pair({ liquidity: { usd: 1 } }), pair(), pair({ quoteToken: { address: 'USDC' }, liquidity: { usd: 1e9 } }), pair({ chainId: 'base' })]);
@@ -340,9 +340,36 @@ test('holder count is looked up on Jupiter before buying a coin found on DexScre
   assert.equal((await scanWith(undefined)).db.positions.length, 0);
 });
 
+test('a breakout is a climb off the recent low that is still going up', () => {
+  const t = 1_000_000;
+  const series = prices => prices.map((price, i) => ({ at: t + i * 30_000, price }));
+  const end = t + 5 * 30_000;
+  assert.equal(breakoutRise(series([1, 1, 1, 1.05, 1.1, 1.2]), end, 15).toFixed(0), '20');
+  assert.equal(breakoutRise(series([1, 1, 1, 1.02, 1.04, 1.06]), end, 15), null, 'not enough rise');
+  assert.equal(breakoutRise(series([1, 1.3, 1.4, 1.2, 1.25, 1.3]), end, 15), null, 'below the high: a bounce, not a breakout');
+  assert.equal(breakoutRise(series([1, 1, 1.1, 1.2, 1.3, 1.25]), end, 15), null, 'last sample fell');
+  assert.equal(breakoutRise(series([1, 1.1, 1.2]), t + 60_000, 15), null, 'too little history');
+});
+test('a breakout bot keeps watching a coin and buys once it starts climbing', async () => {
+  let t = Date.now(), price = 0.001;
+  const quote = url => {
+    const u = new URL(url); const amt = Number(u.searchParams.get('amount'));
+    return { outAmount: String(Math.floor(u.searchParams.get('inputMint') === SOL_MINT ? amt / 1e9 / price * 1e6 : amt / 1e6 * price * 1e9)) };
+  };
+  const fetchImpl = async url => ({ ok: true, json: async () => url.includes('/quote') ? quote(url) : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }] : url.includes('token-boosts') ? [] : url.includes('dexscreener') ? [pair({ pairCreatedAt: t - 20 * 60_000, priceNative: String(price) })] : [] });
+  const connection = { getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null, decimals: 6 } } } } }) };
+  const db = { bots: [{ ...bot, breakoutPct: 15, maxSingleHolderPct: 0, insiderSellPct: 0, paperBalanceSol: 1, stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => t });
+  for (const p of [0.001, 0.001, 0.001, 0.001]) { price = p; await engine.scan(); t += 30_000; }
+  assert.equal(db.positions.length, 0, 'flat: keeps watching');
+  for (const p of [0.00105, 0.0011, 0.0012]) { price = p; await engine.scan(); t += 30_000; }
+  assert.equal(db.positions.length, 1, 'bought on the climb');
+  assert.ok(db.positions[0].features.breakoutRisePct >= 15);
+});
+
 // Rug guard: a fake chain where the coin's biggest wallets can be read and made to sell.
 import { Keypair, PublicKey } from '@solana/web3.js';
-import { insiderWallets, rugSignal } from '../engine.js';
+import { insiderWallets, rugSignal, breakoutRise } from '../engine.js';
 const SUPPLY = 1e15;
 function fakeChain(holders) {
   // holders: [{ owner, amount }] -> token accounts with those balances; amounts can be changed later.

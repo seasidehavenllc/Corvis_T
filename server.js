@@ -286,7 +286,7 @@ function validateBotSettings(body, current = {}) {
     maxRoundTripPct: pick('maxRoundTripPct'), minHolders: pick('minHolders'), maxTopHoldersPct: pick('maxTopHoldersPct'),
     maxDevHoldingPct: pick('maxDevHoldingPct'), maxDevLaunches: pick('maxDevLaunches'), minOrganicScore: pick('minOrganicScore'),
     minPairAgeMinutes: pick('minPairAgeMinutes'), partialTakeProfitMultiplier: pick('partialTakeProfitMultiplier'), partialSellPercent: pick('partialSellPercent'),
-    maxSingleHolderPct: pick('maxSingleHolderPct'), insiderSellPct: pick('insiderSellPct'), maxLiquidityPerHolderUsd: pick('maxLiquidityPerHolderUsd')
+    maxSingleHolderPct: pick('maxSingleHolderPct'), insiderSellPct: pick('insiderSellPct'), maxLiquidityPerHolderUsd: pick('maxLiquidityPerHolderUsd'), breakoutPct: pick('breakoutPct')
   };
   for (const [k, label] of [['maxDevHoldingPct', 'Dev holding limit'], ['minOrganicScore', 'Minimum organic score'], ['partialSellPercent', 'Partial sell'], ['maxSingleHolderPct', 'One-wallet limit'], ['insiderSellPct', 'Rug warning']]) {
     if (!(strategy[k] >= 0 && strategy[k] <= 100)) return { error: `${label} must be 0 (off) to 100.` };
@@ -302,6 +302,7 @@ function validateBotSettings(body, current = {}) {
   if (!(strategy.trailingStopPercent >= 0 && strategy.trailingStopPercent < 100)) return { error: 'Trailing stop must be 0 (off) to 99%.' };
   if (!(strategy.priorityFeeSol >= 0 && strategy.priorityFeeSol <= 0.01)) return { error: 'Priority fee must be between 0 and 0.01 SOL.' };
   if (!(strategy.maxLiquidityPerHolderUsd >= 0)) return { error: 'Liquidity per holder limit must be 0 (off) or more.' };
+  if (!(strategy.breakoutPct >= 0 && strategy.breakoutPct <= 1000)) return { error: 'Breakout rise must be between 0 (off) and 1000%.' };
   if (!(strategy.minLiquidityUsd >= 0)) return { error: 'Minimum liquidity must be 0 or more.' };
   if (!(strategy.maxPairAgeMinutes > 0 && strategy.maxPairAgeMinutes <= 10080)) return { error: 'Max pair age must be between 1 minute and 7 days.' };
   if (!(strategy.minBuys5m >= 0)) return { error: 'Minimum buys must be 0 or more.' };

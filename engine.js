@@ -22,8 +22,14 @@ const TX_FEE_SOL = 0.000005;
 const LOCKED_FLOOR = 1.02; // whole-trade multiple kept once the first target is banked
 const NO_ROUTE = 'No Jupiter route for this token: nobody can buy it right now (its pool is drained or moving). The bot keeps retrying.';
 const AUDIT_KEYS = ['holders', 'topHoldersPct', 'devPct', 'devMints', 'isSus', 'organicScore', 'traders5m', 'organicBuyers5m', 'bondingCurvePct', 'liquidityChange5m'];
-const SEEN_TTL_MS = 30 * 60 * 1000;
+const SEEN_TTL_MS = 2 * 60 * 60 * 1000; // tokens are tracked this long after first sight, waiting for a breakout
 const WATCHLIST_MAX = 300;
+// Breakout entries: every watched token's price is sampled as it is re-checked, and a bot with breakoutPct
+// set only buys a token once it is climbing: up that much from its low over the last BREAKOUT_WINDOW_MS,
+// still within 5% of its high, and its last three samples each higher than the one before.
+const BREAKOUT_WINDOW_MS = 5 * 60_000;
+const BREAKOUT_MIN_SPAN_MS = 2 * 60_000; // need this much tracked history before judging a move
+const PRICE_SAMPLE_MS = 15_000;
 const REVALUE_MS = 15_000; // re-quote each open position at least this often
 const MAX_ACCOUNT_RENT_SOL = 0.0025; // a token account deposit (Token-2022 accounts are a little bigger)
 const GRADUATION_PCT = 80; // skip launchpad tokens this far along their bonding curve
@@ -83,7 +89,7 @@ export const STRATEGY_DEFAULTS = {
   stopLossFollowsPrice: true,
   maxPositionSol: 0.05,
   minLiquidityUsd: 15000,
-  maxPairAgeMinutes: 60,
+  maxPairAgeMinutes: 120,
   minBuys5m: 30,
   minBuySellRatio: 1.5,
   maxOpenPositions: 3,
@@ -103,6 +109,7 @@ export const STRATEGY_DEFAULTS = {
   maxSingleHolderPct: 10,
   maxLiquidityPerHolderUsd: 100,
   insiderSellPct: 5,
+  breakoutPct: 15,
   requireHolderData: true,
   followWallets: [],
   followOnly: false,
@@ -157,6 +164,21 @@ export function passesFilters(pair, bot, now = Date.now()) {
   // Momentum: more buyers than sellers in the last 5 minutes.
   if (bot.minBuySellRatio > 0 && buys < bot.minBuySellRatio * Math.max(sells, 1)) reasons.push('momentum');
   return reasons;
+}
+
+// How far a token has climbed off its recent low, if its tracked prices show a breakout of at least pct:
+// up pct% from the lowest price in the window, still within 5% of the window's high, and rising over its
+// last three samples. Returns the rise in %, or null while there is no breakout (or too little history).
+export function breakoutRise(samples, now, pct) {
+  const recent = (samples || []).filter(s => now - s.at <= BREAKOUT_WINDOW_MS);
+  if (recent.length < 4 || recent[recent.length - 1].at - recent[0].at < BREAKOUT_MIN_SPAN_MS) return null;
+  const prices = recent.map(s => s.price);
+  const last = prices[prices.length - 1], low = Math.min(...prices), high = Math.max(...prices);
+  const [a, b, c] = prices.slice(-3);
+  if (!(a < b && b < c)) return null;
+  if (last < high * 0.95) return null;
+  const rise = (last / low - 1) * 100;
+  return rise >= pct ? rise : null;
 }
 
 // Coins a wallet bought or sold in one parsed transaction, from its token balances before and after.
@@ -490,7 +512,14 @@ export function createEngine({
       for (const feed of feeds) if (feed.status === 'fulfilled' && Array.isArray(feed.value)) for (const item of feed.value) if (item?.chainId === 'solana') add(item.tokenAddress);
       sources.dexscreener = feeds.some(f => f.status === 'fulfilled') ? 'ok' : feeds[0].reason?.message;
     } else sources.dexscreener = 'cooling down after a rate limit';
-    while (watch.size > WATCHLIST_MAX) watch.delete(watch.keys().next().value);
+    if (watch.size > WATCHLIST_MAX) {
+      // Over the limit: drop tokens whose pool is too small for any bot first, then the oldest.
+      const floor = Math.min(...db.bots.map(b => b.minLiquidityUsd || 0));
+      const dead = [...watch.keys()].filter(m => (lastLiquidity.get(m) ?? Infinity) < floor);
+      for (const m of dead) { if (watch.size <= WATCHLIST_MAX) break; watch.delete(m); }
+      while (watch.size > WATCHLIST_MAX) watch.delete(watch.keys().next().value);
+    }
+    for (const m of priceHistory.keys()) if (!watch.has(m)) { priceHistory.delete(m); lastLiquidity.delete(m); }
     health.watching = watch.size;
     // Refresh watched tokens that weren't in this scan's feeds: Jupiter token search first, then DexScreener.
     let stale = [...watch.keys()].filter(m => !pairs.has(m));
@@ -777,7 +806,8 @@ export function createEngine({
       buys5m: pair.txns?.m5?.buys ?? null, buySellRatio: (pair.txns?.m5?.buys || 0) / Math.max(pair.txns?.m5?.sells || 0, 1),
       roundTripPct, priceImpactPct: Number(buyQuote.priceImpactPct || 0) * 100,
       ...Object.fromEntries(AUDIT_KEYS.filter(k => k !== 'isSus').map(k => [k, pair[k] ?? null])),
-      topWalletPct: holders?.wallets[0]?.pct ?? null, creatorPct: holders?.wallets.find(w => w.dev)?.pct ?? null
+      topWalletPct: holders?.wallets[0]?.pct ?? null, creatorPct: holders?.wallets.find(w => w.dev)?.pct ?? null,
+      breakoutRisePct: pair.breakoutRisePct ?? null
     };
     const spot = (await pricesFor([position.mint]).catch(() => new Map())).get(position.mint);
     if (spot > 0) position.entryPrice = position.lastPrice = spot;
@@ -1019,6 +1049,8 @@ export function createEngine({
   // is then graded on its last 100 transactions, and the best that pass are kept in db.smartWallets.
   // Kept wallets are re-graded every 6 hours and dropped once they stop passing.
   const firstSeen = new Map(); // mint -> { price, at }
+  const priceHistory = new Map(); // mint -> [{ at, price }], sampled as watched tokens are re-checked
+  const lastLiquidity = new Map(); // mint -> pool USD at the last check, to drop dead tokens from the watchlist first
   const scouted = new Set();
   const gradeQueue = [];
   const gradedAt = new Map(); // wallet -> last graded
@@ -1152,6 +1184,16 @@ export function createEngine({
       health.candidates = candidates.size;
       for (const [m, p] of candidates) if (!firstSeen.has(m) && Number(p.priceNative) > 0) firstSeen.set(m, { price: Number(p.priceNative), at: now });
       for (const [m, f] of firstSeen) if (now - f.at > 2 * 3_600_000) firstSeen.delete(m);
+      for (const [m, p] of candidates) {
+        const price = Number(p.priceNative);
+        lastLiquidity.set(m, p.liquidity?.usd || 0);
+        if (!(price > 0)) continue;
+        const h = priceHistory.get(m) || [];
+        if (h.length && now - h[h.length - 1].at < PRICE_SAMPLE_MS) continue;
+        h.push({ at: now, price });
+        while (h.length && now - h[0].at > BREAKOUT_WINDOW_MS * 2) h.shift();
+        priceHistory.set(m, h);
+      }
       lastCandidates = candidates;
       // Coins a followed wallet just bought may not be in any feed yet: look them up directly.
       const copied = [...signals.keys()].filter(m => !candidates.has(m));
@@ -1176,6 +1218,12 @@ export function createEngine({
           let failed = passesFilters(pair, bot, now).filter(r => !leader || !FOLLOW_IGNORES.has(r));
           if (failed.length === 1 && failed[0] === 'unknown_holders' && await addHolderData(mint, pair, now)) failed = passesFilters(pair, bot, now).filter(r => !leader || !FOLLOW_IGNORES.has(r));
           if (failed.length) { skips[failed[0]] = (skips[failed[0]] || 0) + 1; continue; }
+          // Breakout bots keep watching a coin that passes the filters and buy once it starts climbing.
+          if (bot.breakoutPct > 0 && !leader) {
+            const rise = breakoutRise(priceHistory.get(mint), now, bot.breakoutPct);
+            if (rise == null) { skips.waiting_breakout = (skips.waiting_breakout || 0) + 1; continue; }
+            pair.breakoutRisePct = rise;
+          }
           if (!(await mintIsSafe(mint).catch(() => false))) { skips.mint_authority = (skips.mint_authority || 0) + 1; continue; }
           try {
             const position = await withWallet(bot, () => openPosition(bot, pair));
