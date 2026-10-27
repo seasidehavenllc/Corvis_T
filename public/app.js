@@ -119,16 +119,33 @@ function renderBots() {
   }).join('');
 }
 
+// Rug check result, shown as its own column so it can be read at a glance.
+function rugPosition(p) {
+  if (p.rugWarning) return `<span class="pill pill-down" title="${esc(p.rugWarning)}">RUG · selling</span>`;
+  if (p.holderWatch) {
+    const top = Math.max(0, ...p.holderWatch.wallets.map(w => w.amount)) / p.holderWatch.supply * 100;
+    return `<span class="pill pill-up" title="Watching ${p.holderWatch.wallets.length} big wallets every 1.5 s. Biggest holds ${top.toFixed(1)}%. None has dumped.">CLEAN</span>`;
+  }
+  return p.holderWatchTried ? '<span class="pill" title="Couldn\'t read this coin\'s holders">not checked</span>' : '<span class="pill pill-warn">checking…</span>';
+}
+function rugTrade(t) {
+  if (t.reason === 'rug_warning') return '<span class="pill pill-down" title="Insiders started dumping; the bot sold early">RUG · sold early</span>';
+  if (t.reason === 'unsellable') return '<span class="pill pill-down" title="Nobody could buy it back">RUG</span>';
+  const f = t.features || {};
+  if (f.topWalletPct != null) return `<span class="pill pill-up" title="Biggest wallet held ${f.topWalletPct.toFixed(1)}% at entry${f.creatorPct != null ? `, creator ${f.creatorPct.toFixed(1)}%` : ''}; no insider dump while held">CLEAN</span>`;
+  return '<span class="pill">not checked</span>';
+}
+
 function positionRows(positions, withBot = true) {
   if (!positions.length) return '<p class="muted">No open positions.</p>';
-  return `<table><thead><tr>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>Spent SOL</th><th title="What selling now would return, after fees">Worth SOL</th><th>P&amp;L</th><th>Held</th><th></th></tr></thead><tbody>${positions.map(p => {
+  return `<table><thead><tr>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>Rug check</th><th>Spent SOL</th><th title="What selling now would return, after fees">Worth SOL</th><th>P&amp;L</th><th>Held</th><th></th></tr></thead><tbody>${positions.map(p => {
     const m = p.multiple ?? 1;
-    return `<tr>${withBot ? `<td>${esc(p.botName || '')}</td>` : ''}<td>${p.pairUrl ? `<a href="${esc(p.pairUrl)}" target="_blank" rel="noopener">${esc(p.symbol)}</a>` : esc(p.symbol)} <span class="pill">${esc(p.mode)}</span>${p.partialDone ? ' <span class="pill pill-up">part banked</span>' : ''}${p.sellError ? ` <span class="pill pill-down" title="${esc(p.sellError)}">no buyers · retrying</span>` : p.sellFailures ? ' <span class="pill pill-down">sell retrying</span>' : ''}</td><td>${sol(p.sizeSol)}</td>${p.sellError ? '<td class="muted">unknown</td><td class="down">can\'t sell</td>' : `<td>${sol(p.sizeSol * m)}</td><td>${signed((m - 1) * 100, 1)}%</td>`}<td>${ago(p.openedAt)}</td><td><button class="btn btn-sm" data-close="${esc(p.id)}" data-bot="${esc(p.botId)}">Sell now</button></td></tr>`;
+    return `<tr>${withBot ? `<td>${esc(p.botName || '')}</td>` : ''}<td>${p.pairUrl ? `<a href="${esc(p.pairUrl)}" target="_blank" rel="noopener">${esc(p.symbol)}</a>` : esc(p.symbol)} <span class="pill">${esc(p.mode)}</span>${p.partialDone ? ' <span class="pill pill-up">part banked</span>' : ''}${p.sellError ? ` <span class="pill pill-down" title="${esc(p.sellError)}">no buyers · retrying</span>` : p.sellFailures ? ' <span class="pill pill-down">sell retrying</span>' : ''}</td><td>${rugPosition(p)}</td><td>${sol(p.sizeSol)}</td>${p.sellError ? '<td class="muted">unknown</td><td class="down">can\'t sell</td>' : `<td>${sol(p.sizeSol * m)}</td><td>${signed((m - 1) * 100, 1)}%</td>`}<td>${ago(p.openedAt)}</td><td><button class="btn btn-sm" data-close="${esc(p.id)}" data-bot="${esc(p.botId)}">Sell now</button></td></tr>`;
   }).join('')}</tbody></table>`;
 }
 function tradeRows(trades, withBot = true) {
   if (!trades.length) return '<p class="muted">No trades yet.</p>';
-  return `<table><thead><tr><th>Closed</th>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>In SOL</th><th>Out SOL</th><th>P&amp;L</th><th>Exit</th><th></th></tr></thead><tbody>${trades.map(t => `<tr><td>${ago(t.closedAt)} ago</td>${withBot ? `<td>${esc(t.botName || '')}</td>` : ''}<td>${esc(t.symbol)} <span class="pill">${esc(t.mode)}</span></td><td>${sol(t.entrySol)}</td><td>${sol(t.exitSol)}</td><td>${signed(t.pnlSol)}</td><td>${esc(REASONS[t.reason] || String(t.reason).replace('_', ' '))}${t.partialSol ? ' <span class="muted small">(part banked)</span>' : ''}</td><td>${explorer(t.sellSignature)}</td></tr>`).join('')}</tbody></table>`;
+  return `<table><thead><tr><th>Closed</th>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>Rug check</th><th>In SOL</th><th>Out SOL</th><th>P&amp;L</th><th>Exit</th><th></th></tr></thead><tbody>${trades.map(t => `<tr><td>${ago(t.closedAt)} ago</td>${withBot ? `<td>${esc(t.botName || '')}</td>` : ''}<td>${esc(t.symbol)} <span class="pill">${esc(t.mode)}</span></td><td>${rugTrade(t)}</td><td>${sol(t.entrySol)}</td><td>${sol(t.exitSol)}</td><td>${signed(t.pnlSol)}</td><td>${esc(REASONS[t.reason] || String(t.reason).replace('_', ' '))}${t.partialSol ? ' <span class="muted small">(part banked)</span>' : ''}</td><td>${explorer(t.sellSignature)}</td></tr>`).join('')}</tbody></table>`;
 }
 // Which entry signals have actually paid off, from this server's own closed trades.
 function renderJournal() {
