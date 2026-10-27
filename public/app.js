@@ -1,4 +1,7 @@
-let adminToken = '';
+// The admin token is remembered on this device so a reload doesn't ask for it again. Lock forgets it.
+const TOKEN_KEY = 'corvis.adminToken';
+const remember = token => { try { token ? localStorage.setItem(TOKEN_KEY, token) : localStorage.removeItem(TOKEN_KEY); } catch {} };
+let adminToken = (() => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; } })();
 let state = { overview: null, config: null, wallet: null, events: [] };
 let editingBotId = null;
 let detailBotId = null;
@@ -10,6 +13,8 @@ async function api(url, options = {}) {
   if (adminToken) headers.authorization = `Bearer ${adminToken}`;
   const response = await fetch(url, { ...options, headers });
   const data = await response.json().catch(() => ({}));
+  // A remembered token that the server no longer accepts (it was changed) is dropped.
+  if (response.status === 401 && adminToken) { adminToken = ''; remember(''); }
   if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
   return data;
 }
@@ -392,12 +397,16 @@ $('#withdrawForm').addEventListener('submit', async e => {
   try { const r = await post('/api/wallet/withdraw', { to: $('#wTo').value.trim(), amountSol: Number($('#wAmount').value), confirm: true }); toast(`Withdrawal sent: ${short(r.signature)}`); refresh(); }
   catch (err) { toast(err.message, true); }
 });
-$('#unlock').addEventListener('click', () => $('#unlockDialog').showModal());
+$('#unlock').addEventListener('click', () => {
+  if (!adminToken) return $('#unlockDialog').showModal();
+  if (!confirm('Lock the dashboard on this device? You will need the admin token to unlock it again.')) return;
+  adminToken = ''; remember(''); toast('Locked'); render();
+});
 $('#unlockForm').addEventListener('submit', async e => {
   if (e.submitter?.value !== 'save') return;
   const previous = adminToken;
   adminToken = $('#token').value.trim();
-  try { await api('/api/auth/check'); toast('Unlocked'); }
+  try { await api('/api/auth/check'); remember(adminToken); toast('Unlocked on this device'); }
   catch (err) { adminToken = previous; toast(err.message, true); }
   render();
 });
