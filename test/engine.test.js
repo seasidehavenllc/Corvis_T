@@ -519,3 +519,27 @@ test('auto-find: a coin that runs 3x leads to its profitable traders, and good o
   assert.equal(db.smartWallets[0].address, trader);
   assert.equal(db.smartWallets[0].closed, 10);
 });
+
+test('wallet clean-up burns coins nobody can buy and closes their accounts for the deposit', async () => {
+  const owner = Keypair.generate();
+  const dead = Keypair.generate().publicKey, empty = Keypair.generate().publicKey, open = Keypair.generate().publicKey;
+  const acct = (mint, amount) => ({ pubkey: Keypair.generate().publicKey, account: { owner: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'), lamports: 2039280, data: { parsed: { info: { mint: mint.toBase58(), tokenAmount: { amount: String(amount) } } } } } });
+  const sent = [];
+  let balance = 1e8;
+  const connection = {
+    getBalance: async () => balance,
+    getParsedTokenAccountsByOwner: async (_o, { programId }) => ({ value: programId.toBase58().startsWith('Tokenkeg') ? [acct(dead, 5000), acct(empty, 0), acct(open, 100)] : [] }),
+    getLatestBlockhash: async () => ({ blockhash: Keypair.generate().publicKey.toBase58(), lastValidBlockHeight: 1e9 }),
+    sendRawTransaction: async raw => { sent.push(raw); balance += 2 * 2039280; return 'sig'; },
+    getSignatureStatuses: async () => ({ value: [{ confirmationStatus: 'confirmed' }] })
+  };
+  const fetchImpl = async () => ({ ok: false, status: 400, text: async () => 'COULD_NOT_FIND_ANY_ROUTE' });
+  const b = { ...bot, mode: 'live' };
+  const db = { bots: [b], trades: [], positions: [{ botId: b.id, mint: open.toBase58() }] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => owner, liveAllowed: true, fetchImpl, clock: () => now, sleep: async () => {} });
+  const r = await engine.cleanupWallet(b);
+  assert.deepEqual(r.burned, [dead.toBase58()]);
+  assert.equal(r.closed, 2); // the dead coin and the empty account; the open position's coin is untouched
+  assert.equal(sent.length, 1);
+  assert.ok(r.recoveredSol > 0.004);
+});

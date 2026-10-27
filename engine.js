@@ -1,5 +1,5 @@
 import { PublicKey, VersionedTransaction, Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
-import { createCloseAccountInstruction } from '@solana/spl-token';
+import { createCloseAccountInstruction, createBurnInstruction, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
 import { randomUUID } from 'node:crypto';
 
 export const SOL_MINT = 'So11111111111111111111111111111111111111112';
@@ -616,6 +616,52 @@ export function createEngine({
     await sendAndConfirm(tx, lastValidBlockHeight);
     return true;
   }
+  // Get SOL back from coins left in a bot wallet (old positions, coins from before a restart). Anything with
+  // a buyer is sold. Coins nobody can buy are burned and every emptied token account is closed, which
+  // refunds its ~0.002 SOL deposit. Coins in this bot's open positions are left alone.
+  async function cleanupWallet(bot) {
+    if (!liveAllowed) throw new Error('Live trading is disabled on this server, so the wallet cannot send transactions.');
+    const owner = getKeypair(bot);
+    const before = await connection.getBalance(owner.publicKey, 'confirmed');
+    const held = new Set(db.positions.filter(p => p.botId === bot.id).map(p => p.mint));
+    const sold = [], burned = [], toClose = [];
+    for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+      const res = await connection.getParsedTokenAccountsByOwner(owner.publicKey, { programId }, 'confirmed');
+      for (const a of res.value) {
+        const info = a.account.data.parsed?.info || {};
+        const mint = info.mint, raw = BigInt(info.tokenAmount?.amount || '0');
+        if (!mint || held.has(mint)) continue;
+        const acct = { pubkey: a.pubkey, mint: new PublicKey(mint), programId: a.account.owner, raw };
+        // Wrapped SOL comes back as SOL when its account is closed.
+        if (raw === 0n || mint === SOL_MINT) { toClose.push(acct); continue; }
+        try {
+          const quote = await jupiterQuote(mint, SOL_MINT, raw.toString(), bot);
+          if (Number(quote.outAmount) / LAMPORTS_PER_SOL > exitFee(bot) + 0.0005) {
+            await jupiterSwap(owner, mint, SOL_MINT, raw.toString(), bot, { quote });
+            sold.push(mint);
+            for (const left of await tokenHoldings(owner.publicKey, mint)) toClose.push({ ...left, mint: new PublicKey(mint) });
+            continue;
+          }
+        } catch (e) { if (e.message !== NO_ROUTE) log('warn', `${bot.name}: could not sell ${mint} during clean-up: ${e.message}`); }
+        burned.push(mint);
+        toClose.push(acct);
+      }
+    }
+    // A few accounts per transaction keeps each one well under the size limit.
+    for (let i = 0; i < toClose.length; i += 6) {
+      const tx = new Transaction();
+      for (const a of toClose.slice(i, i + 6)) {
+        if (a.raw > 0n && !a.mint.equals(new PublicKey(SOL_MINT))) tx.add(createBurnInstruction(a.pubkey, a.mint, owner.publicKey, a.raw, [], a.programId));
+        tx.add(createCloseAccountInstruction(a.pubkey, owner.publicKey, owner.publicKey, [], a.programId));
+      }
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+      tx.recentBlockhash = blockhash; tx.feePayer = owner.publicKey; tx.sign(owner);
+      await sendAndConfirm(tx, lastValidBlockHeight);
+    }
+    const recoveredSol = (await connection.getBalance(owner.publicKey, 'confirmed') - before) / LAMPORTS_PER_SOL;
+    log('info', `${bot.name}: wallet clean-up sold ${sold.length} coin(s), burned ${burned.length} with no buyers, closed ${toClose.length} account(s); ${recoveredSol >= 0 ? '+' : ''}${recoveredSol.toFixed(4)} SOL.`);
+    return { sold, burned, closed: toClose.length, recoveredSol };
+  }
   // SOL the wallet spent (+) or received (-) in one transaction, from the transaction itself, so other
   // trades in the same wallet at the same time can't skew it. The bot wallet always pays the fee, so it
   // is account 0. Falls back to the balance difference when the RPC has not indexed the transaction yet.
@@ -1181,6 +1227,7 @@ export function createEngine({
     stop() { timers.splice(0).forEach(clearInterval); },
     tick, monitor, scan, watchLeaders: () => watchLeaders(clock()), scout: () => scout(clock()), gradeWallet, health, liveAllowed, jupiterSwap, estimateMultiple,
     adoptHoldings: (bot, mints) => withWallet(bot, () => adoptHoldings(bot, mints)),
+    cleanupWallet: bot => withWallet(bot, () => cleanupWallet(bot)),
     closePosition: (bot, position, reason) => withWallet(bot, () => db.positions.includes(position) ? closePosition(bot, position, reason) : null)
   };
 }
