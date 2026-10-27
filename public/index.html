@@ -128,6 +128,8 @@
       <label>Max tokens the dev launched <input id="fDevMints" type="number" min="0" step="any" value="20" required></label>
     </div>
     <label>Min organic score (0–100, 0 = off) <input id="fOrganic" type="number" min="0" max="100" step="any" value="0" required></label>
+    <label>Max held by one wallet (%, 0 = off) <input id="fWhale" type="number" min="0" max="100" step="any" value="10" required></label>
+    <label>Rug warning: sell when top wallets dump (% of supply, 0 = off) <input id="fInsider" type="number" min="0" max="100" step="any" value="2" required></label>
     <p class="muted small">0 turns a filter off. Flagged tokens (Jupiter's suspicious tag) are always skipped.</p>
     <p class="muted small" id="feeHint"></p>
     <p class="muted small">Before every buy the bot quotes buying and selling straight back, and skips tokens that can't be sold or would lose more than the round-trip limit. Take profit and stop loss use what selling would actually return after fees. Tokens are skipped unless mint and freeze authority are revoked. Each bot has its own encrypted wallet; you can withdraw or export its key at any time.</p>

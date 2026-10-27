@@ -280,3 +280,76 @@ test('default filters skip brand-new launches, thin pools and pools losing liqui
   assert.ok(passesFilters({ ...ok, liquidityChange5m: -25 }, d, now).includes('liquidity_falling'));
   assert.ok(passesFilters({ ...ok, holders: 60 }, d, now).includes('holders'));
 });
+
+// Rug guard: a fake chain where the coin's biggest wallets can be read and made to sell.
+import { Keypair, PublicKey } from '@solana/web3.js';
+import { insiderWallets, rugSignal } from '../engine.js';
+const SUPPLY = 1e15;
+function fakeChain(holders) {
+  // holders: [{ owner, amount }] -> token accounts with those balances; amounts can be changed later.
+  const accounts = holders.map(h => ({ ...h, address: Keypair.generate().publicKey }));
+  const tokenAccount = amount => { const d = Buffer.alloc(165); d.writeBigUInt64LE(BigInt(amount), 64); return { data: d }; };
+  return {
+    accounts,
+    connection: {
+      getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null, decimals: 6, supply: String(SUPPLY) } } } } }),
+      getTokenLargestAccounts: async () => ({ value: accounts.map(a => ({ address: a.address, amount: String(a.amount) })) }),
+      getAccountInfo: async () => null,
+      getMultipleParsedAccounts: async keys => ({ value: keys.map(k => ({ data: { parsed: { info: { owner: accounts.find(a => a.address.equals(k)).owner } } } })) }),
+      getMultipleAccountsInfo: async keys => keys.map(k => { const a = accounts.find(x => x.address.equals(k)); return a ? tokenAccount(a.amount) : null; })
+    }
+  };
+}
+const wallet = () => Keypair.generate().publicKey.toBase58();
+const pool = () => PublicKey.findProgramAddressSync([Buffer.from('pool')], Keypair.generate().publicKey)[0].toBase58();
+function paperEngine(connection) {
+  const quote = url => {
+    const u = new URL(url); const amt = Number(u.searchParams.get('amount'));
+    return { outAmount: String(Math.floor(u.searchParams.get('inputMint') === SOL_MINT ? amt / 1e9 / 0.001 * 1e6 : amt / 1e6 * 0.001 * 1e9)) };
+  };
+  const fetchImpl = async url => ({ ok: true, json: async () => url.includes('/quote') ? quote(url) : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }] : url.includes('token-boosts') ? [] : [pair({ pairCreatedAt: Date.now() - 60_000 })] });
+  const db = { bots: [{ ...bot, paperBalanceSol: 1, stats: { ...bot.stats } }], trades: [], positions: [] };
+  let t = Date.now();
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => (t += 2_000) });
+  return { db, engine };
+}
+
+test('only real wallets count as insiders, not pools or curves', () => {
+  const dev = wallet();
+  const ws = insiderWallets([{ account: 'a', owner: pool(), amount: 5e14 }, { account: 'b', owner: dev, amount: 3e13 }, { account: 'c', owner: wallet(), amount: 5e13 }], SUPPLY, { creator: dev });
+  assert.deepEqual(ws.map(w => w.account), ['c', 'b']);
+  assert.equal(ws[1].dev, true);
+  assert.equal(ws[0].pct, 5);
+});
+
+test('rug signal: creator dumping or top wallets selling together', () => {
+  const watch = { supply: SUPPLY, wallets: [{ account: 'dev', amount: 2e13, dev: true }, { account: 'w1', amount: 4e13 }, { account: 'w2', amount: 3e13 }] };
+  const b = { insiderSellPct: 2 };
+  assert.equal(rugSignal(watch, new Map([['dev', 2e13], ['w1', 4e13], ['w2', 3e13]]), b), null);
+  assert.match(rugSignal(watch, new Map([['dev', 1e13]]), b), /creator sold 1\.0%/);
+  assert.equal(rugSignal(watch, new Map([['w1', 3e13]]), b), null); // 1% of supply: normal selling
+  assert.match(rugSignal(watch, new Map([['w1', 2e13], ['w2', 2e13]]), b), /biggest wallets sold 3\.0%/);
+  assert.equal(rugSignal(watch, new Map([['w1', 0]]), { insiderSellPct: 0 }), null); // turned off
+});
+
+test('coins where one wallet holds too much are never bought', async () => {
+  const { connection } = fakeChain([{ owner: pool(), amount: 6e14 }, { owner: wallet(), amount: 2e14 }]);
+  const { db, engine } = paperEngine(connection);
+  await engine.tick();
+  assert.equal(db.positions.length, 0);
+});
+
+test('the bot sells as soon as the biggest wallets start dumping, before the price moves', async () => {
+  const chain = fakeChain([{ owner: pool(), amount: 6e14 }, { owner: wallet(), amount: 6e13 }, { owner: wallet(), amount: 5e13 }]);
+  const { db, engine } = paperEngine(chain.connection);
+  await engine.tick();
+  assert.equal(db.positions.length, 1);
+  assert.equal(db.positions[0].holderWatch.wallets.length, 2);
+  await engine.monitor();
+  assert.equal(db.positions.length, 1, 'no selling, no warning');
+  chain.accounts[1].amount = 2e13; // a 6% wallet sells 4% of the supply
+  await engine.monitor(); // sees the sell
+  await engine.monitor(); // sells
+  assert.equal(db.positions.length, 0);
+  assert.equal(db.trades[0].reason, 'rug_warning');
+});

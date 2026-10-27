@@ -31,6 +31,9 @@ const PRICE_MS = 3_000; // spot price refresh for open positions
 const DEX_PRICE_MS = 1_000; // DexScreener price refresh for open positions
 // pump.fun bonding curves are read straight from the chain every tick, the fastest price there is.
 const PUMP_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+const HOLDER_MS = 1_500; // how often the biggest wallets of open positions are re-read for rug signs
+const WATCHED_WALLETS = 10; // biggest wallets watched per position, plus the coin's creator
+const MIN_WATCHED_PCT = 0.5; // ...when they hold at least this much of the supply
 
 export const STRATEGY_DEFAULTS = {
   mode: 'paper',
@@ -56,6 +59,8 @@ export const STRATEGY_DEFAULTS = {
   minPairAgeMinutes: 5,
   partialTakeProfitMultiplier: 1.15,
   partialSellPercent: 50,
+  maxSingleHolderPct: 10,
+  insiderSellPct: 2,
   priorityFeeSol: 0.0003,
   maxDailyLossSol: 0.2,
   paperBalanceSol: 1
@@ -100,6 +105,33 @@ export function passesFilters(pair, bot, now = Date.now()) {
   // Momentum: more buyers than sellers in the last 5 minutes.
   if (bot.minBuySellRatio > 0 && buys < bot.minBuySellRatio * Math.max(sells, 1)) reasons.push('momentum');
   return reasons;
+}
+
+// Holders worth watching for a rug: real wallets, biggest first. Pools, launchpad curves and lockers are
+// owned by program addresses (off the ed25519 curve), so only on-curve owners count. `accounts` is
+// [{ account, owner, amount }] in raw token units.
+export function insiderWallets(accounts, supply, { creator = null, exclude = [] } = {}) {
+  return accounts
+    .filter(a => a.owner && !exclude.includes(a.owner) && PublicKey.isOnCurve(a.owner))
+    .map(a => ({ account: a.account, owner: a.owner, amount: a.amount, pct: supply > 0 ? a.amount / supply * 100 : 0, dev: a.owner === creator }))
+    .sort((a, b) => b.amount - a.amount);
+}
+
+// A rug is usually insiders selling: the coin's creator, or its biggest wallets, dumping into the pool.
+// Their first sells land seconds to minutes before the crash, so seeing them is the warning.
+// `watch` is { supply, wallets } from entry, `balances` maps token account -> raw amount now.
+export function rugSignal(watch, balances, bot) {
+  if (!watch?.supply || !(bot.insiderSellPct > 0)) return null;
+  let sold = 0;
+  for (const w of watch.wallets) {
+    if (!balances.has(w.account)) continue;
+    const drop = Math.max(0, w.amount - balances.get(w.account));
+    // The creator selling a tenth of their bag, and at least 0.1% of the supply, is the classic dev dump.
+    if (w.dev && drop > w.amount * 0.1 && drop >= watch.supply * 0.001) return `its creator sold ${(drop / watch.supply * 100).toFixed(1)}% of the supply`;
+    sold += drop;
+  }
+  const pct = sold / watch.supply * 100;
+  return pct >= bot.insiderSellPct ? `its biggest wallets sold ${pct.toFixed(1)}% of the supply` : null;
 }
 
 // Whether to bank part of a position at the first target (scale out, like most successful traders do).
@@ -163,6 +195,7 @@ export function createEngine({
   const watch = new Map(); // mint -> first seen time
   const safety = new Map(); // mint -> boolean
   const decimals = new Map(); // mint -> token decimals
+  const supplies = new Map(); // mint -> total supply in raw units
   const timers = [];
   let monitoring = false;
   let scanning = false;
@@ -363,9 +396,35 @@ export function createEngine({
     const info = await marketConnection.getParsedAccountInfo(new PublicKey(mint), 'confirmed');
     const parsed = info.value?.data?.parsed?.info;
     const ok = Boolean(parsed) && parsed.mintAuthority == null && parsed.freezeAuthority == null;
-    if (parsed) decimals.set(mint, parsed.decimals);
+    if (parsed) { decimals.set(mint, parsed.decimals); if (Number(parsed.supply) > 0) supplies.set(mint, Number(parsed.supply)); }
     safety.set(mint, ok);
     return ok;
+  }
+
+  // The coin's biggest real wallets and its creator, read from the chain, to judge and then watch for a rug.
+  // pump.fun curve accounts name the creator (bytes 49-81), also after the coin has graduated.
+  async function topHolders(mint, exclude = []) {
+    const key = new PublicKey(mint);
+    const supply = supplies.get(mint) ?? Number((await marketConnection.getTokenSupply(key, 'confirmed')).value.amount);
+    const curve = PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), key.toBuffer()], PUMP_PROGRAM)[0];
+    const [largest, curveInfo] = await Promise.all([
+      marketConnection.getTokenLargestAccounts(key, 'confirmed'),
+      marketConnection.getAccountInfo(curve, 'confirmed').catch(() => null)
+    ]);
+    const creator = curveInfo?.owner?.equals?.(PUMP_PROGRAM) && curveInfo.data.length >= 81 ? new PublicKey(curveInfo.data.subarray(49, 81)).toBase58() : null;
+    const top = largest.value.filter(a => Number(a.amount) > 0);
+    const infos = await marketConnection.getMultipleParsedAccounts(top.map(a => a.address), { commitment: 'confirmed' });
+    const accounts = top.map((a, i) => ({ account: a.address.toBase58(), owner: infos.value[i]?.data?.parsed?.info?.owner || null, amount: Number(a.amount) }));
+    // A creator outside the top 20 can still dump what they hold, so look their balance up too.
+    if (creator && !accounts.some(a => a.owner === creator)) {
+      const own = await marketConnection.getParsedTokenAccountsByOwner(new PublicKey(creator), { mint: key }, 'confirmed').catch(() => ({ value: [] }));
+      for (const a of own.value) {
+        const amount = Number(a.account.data.parsed?.info?.tokenAmount?.amount || 0);
+        if (amount > 0) accounts.push({ account: a.pubkey.toBase58(), owner: creator, amount });
+      }
+    }
+    const wallets = insiderWallets(accounts, supply, { creator, exclude });
+    return { supply, creator, wallets, watched: wallets.filter((w, i) => w.dev || (i < WATCHED_WALLETS && w.pct >= MIN_WATCHED_PCT)) };
   }
 
   // Send, then rebroadcast every 2s until confirmed or the blockhash expires.
@@ -511,6 +570,15 @@ export function createEngine({
       }
     } else if (bot.paperBalanceSol < bot.maxPositionSol + fee) return null;
 
+    // One wallet holding a big slice of the supply can crash the price with a single sell, so skip those.
+    // The biggest wallets are kept on the position and watched while it is open.
+    let holders = null;
+    if (bot.maxSingleHolderPct > 0 || bot.insiderSellPct > 0) {
+      holders = await topHolders(position.mint, owner ? [owner.publicKey.toBase58()] : []).catch(() => null);
+      const whale = holders?.wallets.find(w => w.pct > bot.maxSingleHolderPct);
+      if (whale && bot.maxSingleHolderPct > 0) throw new Error(`one ${whale.dev ? 'creator ' : ''}wallet holds ${whale.pct.toFixed(1)}% of the supply (limit ${bot.maxSingleHolderPct}%)`);
+    }
+
     // Check the token can be sold back, and what a buy-then-sell round trip costs, before buying.
     // This catches tokens with no sell route (honeypots), transfer taxes and pools too thin to exit.
     const buyQuote = await jupiterQuote(SOL_MINT, position.mint, lamports, bot);
@@ -538,12 +606,14 @@ export function createEngine({
     }
     position.tokens = Number(position.tokenRaw) / 10 ** (decimals.get(position.mint) ?? 6);
     position.roundTripPct = roundTripPct;
+    if (holders) position.holderWatch = { supply: holders.supply, wallets: holders.watched.map(({ account, amount, dev }) => ({ account, amount, dev })) };
     // What the token looked like when bought, so the trade journal can show which signals win.
     position.features = {
       ageMin: pair.pairCreatedAt ? (now - pair.pairCreatedAt) / 60_000 : null, liquidityUsd: pair.liquidity?.usd ?? null,
       buys5m: pair.txns?.m5?.buys ?? null, buySellRatio: (pair.txns?.m5?.buys || 0) / Math.max(pair.txns?.m5?.sells || 0, 1),
       roundTripPct, priceImpactPct: Number(buyQuote.priceImpactPct || 0) * 100,
-      ...Object.fromEntries(AUDIT_KEYS.filter(k => k !== 'isSus').map(k => [k, pair[k] ?? null]))
+      ...Object.fromEntries(AUDIT_KEYS.filter(k => k !== 'isSus').map(k => [k, pair[k] ?? null])),
+      topWalletPct: holders?.wallets[0]?.pct ?? null, creatorPct: holders?.wallets.find(w => w.dev)?.pct ?? null
     };
     const spot = (await pricesFor([position.mint]).catch(() => new Map())).get(position.mint);
     if (spot > 0) position.entryPrice = position.lastPrice = spot;
@@ -551,7 +621,7 @@ export function createEngine({
     markValue(position, Number(backQuote.outAmount) * scale / LAMPORTS_PER_SOL - exitFee(bot), position.lastPrice, now);
     position.peakMultiple = position.multiple;
     db.positions.push(position);
-    log('info', `${bot.name} bought ${position.symbol} for ${position.sizeSol.toFixed(4)} SOL (${bot.mode}); worth ${position.valueSol.toFixed(4)} SOL if sold now.`);
+    log('info', `${bot.name} bought ${position.symbol} (${position.mint}) for ${position.sizeSol.toFixed(4)} SOL (${bot.mode}); worth ${position.valueSol.toFixed(4)} SOL if sold now. Entry: ${JSON.stringify(position.features)}`);
     return position;
   }
 
@@ -651,6 +721,12 @@ export function createEngine({
   // when to look closer: every exit is confirmed with a real sell quote first.
   async function managePosition(bot, position, now) {
     if (position.nextSellAt && now < position.nextSellAt) return;
+    // Insiders are selling: get out now, without waiting for a fresh quote or any other exit rule.
+    if (position.rugWarning) {
+      log('warn', `${bot.name}: rug warning on ${position.symbol}: ${position.rugWarning}. Selling now.`);
+      await closePosition(bot, position, 'rug_warning');
+      return;
+    }
     const timeUp = now - Date.parse(position.openedAt) >= bot.maxHoldMinutes * 60_000;
     const est = estimateMultiple(position);
     // Within 5% of take profit counts as a hint too, so a fast spike is confirmed and sold without waiting.
@@ -683,6 +759,35 @@ export function createEngine({
     else if (partialDue(position, bot, position.multiple)) await sellPart(bot, position, now);
   }
 
+  // Re-read the watched wallets of every open position in one batched call, and flag positions whose
+  // insiders have started selling. Positions taken back after a restart get their wallets looked up here.
+  let lastHolderAt = 0;
+  async function watchInsiders(open, now) {
+    if (now - lastHolderAt < HOLDER_MS) return;
+    lastHolderAt = now;
+    const watching = open.filter(p => db.bots.find(b => b.id === p.botId)?.insiderSellPct > 0);
+    const missing = watching.find(p => !p.holderWatch && !p.holderWatchTried);
+    if (missing) {
+      missing.holderWatchTried = true;
+      const bot = db.bots.find(b => b.id === missing.botId);
+      const h = await topHolders(missing.mint, missing.mode === 'live' ? [getKeypair(bot).publicKey.toBase58()] : []).catch(() => null);
+      if (h) missing.holderWatch = { supply: h.supply, wallets: h.watched.map(({ account, amount, dev }) => ({ account, amount, dev })) };
+    }
+    const accounts = [...new Set(watching.flatMap(p => p.holderWatch?.wallets.map(w => w.account) || []))];
+    if (!accounts.length) return;
+    const balances = new Map();
+    for (let i = 0; i < accounts.length; i += 100) {
+      const batch = accounts.slice(i, i + 100);
+      const infos = await marketConnection.getMultipleAccountsInfo(batch.map(a => new PublicKey(a)), 'processed');
+      // A token account's amount sits at bytes 64-72 (SPL Token and Token-2022). A closed account holds nothing.
+      batch.forEach((a, j) => balances.set(a, infos[j]?.data?.length >= 72 ? Number(infos[j].data.readBigUInt64LE(64)) : 0));
+    }
+    for (const p of watching) {
+      const reason = p.rugWarning ? null : rugSignal(p.holderWatch, balances, db.bots.find(b => b.id === p.botId));
+      if (reason) p.rugWarning = reason;
+    }
+  }
+
   // Fast loop: price every open position and sell the moment an exit rule triggers.
   let lastPriceAt = 0, lastDexAt = 0, lastSaveAt = 0, dexMiss = new Set();
   async function monitor() {
@@ -712,6 +817,7 @@ export function createEngine({
           for (const [m, price] of await pricesFor(missing)) prices.set(m, price);
         }
         for (const position of open) { const price = prices.get(position.mint); if (price > 0) position.lastPrice = price; }
+        await watchInsiders(open, now).catch(e => { health.lastError = `Rug watch: ${e.message}`; });
         await Promise.all(open.map(position => {
           const bot = db.bots.find(b => b.id === position.botId);
           return withWallet(bot, () => db.positions.includes(position) && managePosition(bot, position, now)).catch(e => sellFailed(bot, position, e, now));
@@ -766,7 +872,7 @@ export function createEngine({
           try { if (await withWallet(bot, () => openPosition(bot, pair))) bought = true; }
           catch (e) {
             rejected.set(mint, now + (/ 429|budget/.test(e.message) ? 30_000 : 5 * 60_000));
-            const key = /round trip|selling back/.test(e.message) ? 'round_trip' : /impact/.test(e.message) ? 'price_impact' : /route/.test(e.message) ? 'no_route'
+            const key = /round trip|selling back/.test(e.message) ? 'round_trip' : /impact/.test(e.message) ? 'price_impact' : /route/.test(e.message) ? 'no_route' : /wallet holds/.test(e.message) ? 'whale'
               : /on top of the trade/.test(e.message) ? 'hidden_cost' : /would fail/.test(e.message) ? 'would_fail' : / 429/.test(e.message) ? 'rate_limited' : 'error';
             skips[key] = (skips[key] || 0) + 1;
             if (key === 'error') log('error', `${bot.name}: buy of ${pair.baseToken?.symbol} failed: ${e.message}`);
