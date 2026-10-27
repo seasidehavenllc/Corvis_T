@@ -87,13 +87,13 @@
     </label>
     <h4>Exits</h4>
     <div class="row3">
-      <label>First target (% profit) <input id="fPartTp" type="number" min="1" max="900" step="any" value="30" required></label>
+      <label>First target (% profit) <input id="fPartTp" type="number" min="1" max="900" step="any" value="15" required></label>
       <label>Sell at first target (%, 0 = off) <input id="fPartPct" type="number" min="0" max="99" step="any" value="50" required></label>
       <label>Sell all at (% profit) <input id="fTp" type="number" min="1" max="900" step="any" value="50" required></label>
     </div>
     <p class="muted small">Profit is measured after fees, from what selling would actually return. Scaling out: at the first target the bot banks part of the position, and the rest can no longer turn the trade into a loss.</p>
     <div class="row3">
-      <label>Stop loss (%) <input id="fSl" type="number" min=".1" max="100" step="any" value="15" required></label>
+      <label>Stop loss (%) <input id="fSl" type="number" min=".1" max="100" step="any" value="12" required></label>
       <label>Max hold (min) <input id="fHold" type="number" min="1" max="10080" step="any" value="30" required></label>
       <label>Skip pairs younger than (min) <input id="fMinAge" type="number" min="0" max="10079" step="any" value="0" required></label>
     </div>
@@ -112,13 +112,13 @@
       <label>Min buys (last 5m) <input id="fBuys" type="number" min="0" step="any" value="10" required></label>
     </div>
     <div class="row3">
-      <label>Min buy/sell ratio <input id="fRatio" type="number" min="0" max="20" step="any" value="1.2" required></label>
+      <label>Min buy/sell ratio <input id="fRatio" type="number" min="0" max="20" step="any" value="1.5" required></label>
       <label>Slippage (bps) <input id="fSlip" type="number" min="10" max="5000" step="any" value="500" required></label>
       <label>Priority fee (max SOL) <input id="fPrio" type="number" min="0" max="0.01" step="any" value="0.0003" required></label>
     </div>
     <div class="row3">
       <label>Max price impact (%, 0 = off) <input id="fImpact" type="number" min="0" max="100" step="any" value="8" required></label>
-      <label>Max round-trip cost (%, 0 = off) <input id="fRound" type="number" min="0" max="100" step="any" value="6" required></label>
+      <label>Max round-trip cost (%, 0 = off) <input id="fRound" type="number" min="0" max="100" step="any" value="4" required></label>
       <label>Min holders <input id="fHolders" type="number" min="0" step="any" value="40" required></label>
     </div>
     <h4>Rug filters</h4>
