@@ -19,7 +19,7 @@ const LOCKED_FLOOR = 1.02; // whole-trade multiple kept once the first target is
 const NO_ROUTE = 'No Jupiter route for this token: nobody can buy it right now (its pool is drained or moving). The bot keeps retrying.';
 const AUDIT_KEYS = ['holders', 'topHoldersPct', 'devPct', 'devMints', 'isSus', 'organicScore', 'traders5m', 'organicBuyers5m', 'bondingCurvePct', 'liquidityChange5m'];
 const SEEN_TTL_MS = 30 * 60 * 1000;
-const WATCHLIST_MAX = 120;
+const WATCHLIST_MAX = 300;
 const REVALUE_MS = 15_000; // re-quote each open position at least this often
 const MAX_ACCOUNT_RENT_SOL = 0.0025; // a token account deposit (Token-2022 accounts are a little bigger)
 const GRADUATION_PCT = 80; // skip launchpad tokens this far along their bonding curve
@@ -362,7 +362,16 @@ export function createEngine({
       // Fetched every 30 seconds, so it uses little of the Jupiter request budget.
       if (now - lastOrganicAt >= 30_000) {
         lastOrganicAt = now;
-        try { for (const t of await feedJson(`${JUPITER_TOKENS}/toporganicscore/5m?limit=100`, 60_000) || []) keep(jupiterPair(t)); sources.jupiterOrganic = 'ok'; }
+        // Most of this list is long-established coins (SOL, USDC, ...). Only coins young enough for some
+        // bot to buy are kept, so they don't crowd new launches out of the watchlist.
+        const maxAgeMs = Math.max(0, ...db.bots.filter(b => b.enabled).map(b => b.maxPairAgeMinutes)) * 60_000;
+        try {
+          for (const t of await feedJson(`${JUPITER_TOKENS}/toporganicscore/5m?limit=100`, 60_000) || []) {
+            const pair = jupiterPair(t);
+            if (pair?.pairCreatedAt && now - pair.pairCreatedAt <= maxAgeMs) keep(pair);
+          }
+          sources.jupiterOrganic = 'ok';
+        }
         catch (e) { sources.jupiterOrganic = e.message; }
       }
     }
