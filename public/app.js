@@ -198,6 +198,7 @@ function openBotForm(bot) {
   $('#fSlFollow').checked = (bot || defaults).stopLossFollowsPrice ?? defaults.stopLossFollowsPrice;
   $('#fFollow').value = (bot?.followWallets || []).join('\n');
   $('#fFollowOnly').checked = Boolean(bot?.followOnly);
+  $('#followReport').innerHTML = '';
   feeHint();
   botError('');
   $('#botDialog').showModal();
@@ -208,6 +209,27 @@ function feeHint() {
   const pctCost = size > 0 ? fee * 2 / size * 100 : 0;
   $('#feeHint').innerHTML = size > 0 ? `Fees take about <b class="${pctCost > 3 ? 'down' : ''}">${pctCost.toFixed(1)}%</b> of each trade (buy + sell).${pctCost > 3 ? ' That is a lot: use a bigger position or a lower priority fee.' : ''}` : '';
 }
+// Grade each pasted wallet from its last 100 transactions before trusting it with copy trades.
+function walletVerdict(r) {
+  if (r.swapsPerHour > 30) return ['down', 'trades like a bot: skip'];
+  if (r.closed < 8) return ['', 'too few finished trades to judge'];
+  if (r.pnlSol > 0 && r.winRate >= 0.4) return ['up', 'looks good'];
+  return ['down', 'losing: skip'];
+}
+$('#checkFollow').addEventListener('click', async () => {
+  const wallets = $('#fFollow').value.split(/[\s,]+/).filter(Boolean);
+  if (!wallets.length) { $('#followReport').innerHTML = '<p class="muted">Paste wallet addresses first.</p>'; return; }
+  $('#followReport').innerHTML = '<p class="muted">Reading their last 100 transactions… (about 10 s per wallet)</p>';
+  const rows = [];
+  for (const w of wallets) {
+    try {
+      const r = await api(`/api/wallets/${encodeURIComponent(w)}/record`);
+      const [cls, verdict] = walletVerdict(r);
+      rows.push(`<tr><td class="mono" title="${esc(w)}">${esc(short(w))}</td><td>${r.closed}${r.unsold ? ` <span class="muted">(${r.unsold} never sold)</span>` : ''}</td><td>${r.winRate == null ? '–' : pct(r.winRate)}</td><td>${signed(r.pnlSol, 2)}</td><td>${r.swapsPerHour.toFixed(1)}</td><td class="${cls}">${esc(verdict)}</td></tr>`);
+    } catch (e) { rows.push(`<tr><td class="mono">${esc(short(w))}</td><td colspan="5" class="down">${esc(e.message)}</td></tr>`); }
+    $('#followReport').innerHTML = `<table><thead><tr><th>Wallet</th><th>Finished trades</th><th>Win rate</th><th>P&amp;L SOL</th><th>Trades/hr</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+  }
+});
 $('#fMax').addEventListener('input', feeHint);
 $('#fPrio').addEventListener('input', feeHint);
 $('#newBot').addEventListener('click', () => openBotForm(null));
