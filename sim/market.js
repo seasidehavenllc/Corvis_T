@@ -184,7 +184,7 @@ export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:0
     async getParsedTokenAccountsByOwner(pk, { mint }) {
       const acct = wallet(pk.toBase58()).tokens.get(mint.toBase58());
       if (!acct) return { value: [] };
-      return { value: [{ pubkey: Keypair.generate().publicKey, account: { owner: TOKEN_PROGRAM_ID, data: { parsed: { info: { tokenAmount: { amount: acct.raw.toString(), uiAmount: Number(acct.raw) / 10 ** DECIMALS } } } } } }] };
+      return { value: [{ pubkey: Keypair.generate().publicKey, account: { owner: TOKEN_PROGRAM_ID, lamports: RENT, data: { parsed: { info: { tokenAmount: { amount: acct.raw.toString(), uiAmount: Number(acct.raw) / 10 ** DECIMALS } } } } } }] };
     },
     async getLatestBlockhash() {
       const blockhash = Keypair.generate().publicKey.toBase58();

@@ -21,6 +21,7 @@ const AUDIT_KEYS = ['holders', 'topHoldersPct', 'devPct', 'devMints', 'isSus', '
 const SEEN_TTL_MS = 30 * 60 * 1000;
 const WATCHLIST_MAX = 120;
 const REVALUE_MS = 15_000; // re-quote each open position at least this often
+const MAX_ACCOUNT_RENT_SOL = 0.0025; // a token account deposit (Token-2022 accounts are a little bigger)
 const GRADUATION_PCT = 80; // skip launchpad tokens this far along their bonding curve
 const REVALUE_MIN_MS = 2_000; // ...and up to this often when few positions share the Jupiter budget
 // Tokens named after major coins are almost always copycat rugs.
@@ -192,6 +193,9 @@ export function createEngine({
     if (jup) await takeJupiter(priority);
     const res = await fetchImpl(url, { ...init, headers: { accept: 'application/json', ...(jup ? JUPITER_HEADERS : {}), ...(init?.headers || {}) } });
     if (!res.ok) {
+      // Jupiter counts its limit over a rolling window; after a 429 everyone waits ~3 s so the next
+      // request (often a sell) isn't refused too.
+      if (jup && res.status === 429) { bucket.tokens = Math.min(bucket.tokens, -jupiterRpm / 20); bucket.at = clock(); }
       const body = await res.text?.().catch(() => '') || '';
       // Jupiter answers 400 when a token has no route (e.g. liquidity pulled); report it as such.
       // CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD means the sell would return next to nothing: the pool is drained.
@@ -395,13 +399,28 @@ export function createEngine({
       })
     });
     const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
+    if (buying && connection.simulateTransaction) await checkBuyCost(owner, tx, Number(amount), bot);
     tx.sign([owner]);
     return { signature: await sendAndConfirm(tx, lastValidBlockHeight), quote };
+  }
+  // Dry-run the buy first. A swap that would fail (slippage, missing accounts) is skipped without paying
+  // its fee, and so is one that would take more SOL than the trade, one token account deposit and the
+  // priority fee: some routes open extra accounts or charge launchpad fees that are never paid back.
+  async function checkBuyCost(owner, tx, lamports, bot) {
+    const address = owner.publicKey.toBase58();
+    const before = await connection.getBalance(owner.publicKey, 'processed');
+    const sim = await connection.simulateTransaction(tx, { sigVerify: false, commitment: 'processed', accounts: { encoding: 'base64', addresses: [address] } });
+    if (sim.value?.err) throw new Error(`the buy would fail on-chain: ${JSON.stringify(sim.value.err)}`);
+    const after = sim.value?.accounts?.[0]?.lamports;
+    if (after == null) return;
+    const extra = (before - after - lamports) / LAMPORTS_PER_SOL;
+    const allowed = MAX_ACCOUNT_RENT_SOL + (bot.priorityFeeSol || 0) + 0.0001;
+    if (extra > allowed) throw new Error(`the buy would cost ${extra.toFixed(4)} SOL on top of the trade (extra accounts or launchpad fees)`);
   }
   async function tokenHoldings(owner, mint) {
     const res = await connection.getParsedTokenAccountsByOwner(owner, { mint: new PublicKey(mint) }, 'confirmed');
     return res.value.map(a => ({
-      pubkey: a.pubkey, programId: a.account.owner,
+      pubkey: a.pubkey, programId: a.account.owner, lamports: a.account.lamports || 0,
       raw: BigInt(a.account.data.parsed?.info?.tokenAmount?.amount || '0'),
       ui: Number(a.account.data.parsed?.info?.tokenAmount?.uiAmount || 0)
     }));
@@ -409,13 +428,29 @@ export function createEngine({
   // Close emptied token accounts so the ~0.002 SOL rent comes back to the bot wallet.
   async function reclaimRent(owner, accounts) {
     const empty = accounts.filter(a => a.raw === 0n);
-    if (!empty.length) return;
+    if (!empty.length) return false;
     const tx = new Transaction();
     for (const a of empty) tx.add(createCloseAccountInstruction(a.pubkey, owner.publicKey, owner.publicKey, [], a.programId));
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
     tx.recentBlockhash = blockhash; tx.feePayer = owner.publicKey; tx.sign(owner);
     await sendAndConfirm(tx, lastValidBlockHeight);
+    return true;
   }
+  // SOL the wallet spent (+) or received (-) in one transaction, from the transaction itself, so other
+  // trades in the same wallet at the same time can't skew it. The bot wallet always pays the fee, so it
+  // is account 0. Falls back to the balance difference when the RPC has not indexed the transaction yet.
+  async function solDelta(signature, fallbackLamports) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const tx = await connection.getTransaction?.(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 }).catch(() => null);
+      if (tx?.meta) return (tx.meta.preBalances[0] - tx.meta.postBalances[0]) / LAMPORTS_PER_SOL;
+      if (!connection.getTransaction) break;
+      await sleep(500);
+    }
+    return fallbackLamports / LAMPORTS_PER_SOL;
+  }
+  // The token account's rent deposit is paid on the first buy and refunded when the empty account is
+  // closed, so it is not part of the trade's cost.
+  const rentOf = accounts => accounts.reduce((s, a) => s + (a.lamports || 0), 0) / LAMPORTS_PER_SOL;
 
   const exitFee = bot => TX_FEE_SOL + (bot.priorityFeeSol || 0);
   // What selling the whole position right now would return, after fees, from a real Jupiter quote.
@@ -437,6 +472,7 @@ export function createEngine({
     return ((position.realizedSol || 0) + position.valueSol * scale) / position.sizeSol;
   }
 
+  const lowBalanceLoggedAt = new Map(); // bot id -> last time the low-balance warning was logged
   async function openPosition(bot, pair) {
     const price = Number(pair.priceNative);
     if (!(price > 0) || !(bot.maxPositionSol > 0)) return null;
@@ -453,7 +489,13 @@ export function createEngine({
       if (!liveAllowed) return null;
       owner = getKeypair(bot);
       before = await connection.getBalance(owner.publicKey, 'confirmed');
-      if (before < lamports + 0.01 * LAMPORTS_PER_SOL) { log('warn', `${bot.name}: wallet balance too low for a ${bot.maxPositionSol} SOL buy.`); return null; }
+      if (before < lamports + 0.01 * LAMPORTS_PER_SOL) {
+        if (now - (lowBalanceLoggedAt.get(bot.id) || 0) >= 60_000) {
+          lowBalanceLoggedAt.set(bot.id, now);
+          log('warn', `${bot.name}: wallet balance too low for a ${bot.maxPositionSol} SOL buy (needs ${(bot.maxPositionSol + 0.01).toFixed(3)} SOL: the buy plus 0.01 SOL kept for fees and account deposits).`);
+        }
+        return null;
+      }
     } else if (bot.paperBalanceSol < bot.maxPositionSol + fee) return null;
 
     // Check the token can be sold back, and what a buy-then-sell round trip costs, before buying.
@@ -468,9 +510,11 @@ export function createEngine({
     if (bot.mode === 'live') {
       const { signature } = await jupiterSwap(owner, SOL_MINT, position.mint, lamports, bot, { buying: true, quote: buyQuote });
       const after = await connection.getBalance(owner.publicKey, 'confirmed');
-      position.sizeSol = (before - after) / LAMPORTS_PER_SOL;
+      const holdings = await tokenHoldings(owner.publicKey, position.mint);
+      position.rentSol = rentOf(holdings);
+      position.sizeSol = await solDelta(signature, before - after) - position.rentSol;
       position.buySignature = signature;
-      const raw = (await tokenHoldings(owner.publicKey, position.mint)).reduce((s, a) => s + a.raw, 0n);
+      const raw = holdings.reduce((s, a) => s + a.raw, 0n);
       position.tokenRaw = (raw > 0n ? raw : BigInt(buyQuote.otherAmountThreshold || buyQuote.outAmount)).toString();
     } else {
       // Paper fills use real Jupiter quotes plus network and priority fees, so paper results match
@@ -506,9 +550,11 @@ export function createEngine({
       const before = await connection.getBalance(owner.publicKey, 'confirmed');
       const raw = (await tokenHoldings(owner.publicKey, position.mint)).reduce((s, a) => s + a.raw, 0n);
       if (raw > 0n) sellSignature = (await jupiterSwap(owner, position.mint, SOL_MINT, raw.toString(), bot, { quote: quote && String(raw) === quote.inAmount ? quote : null })).signature;
-      await reclaimRent(owner, await tokenHoldings(owner.publicKey, position.mint)).catch(e => log('warn', `${bot.name}: could not close empty ${position.symbol} account: ${e.message}`));
-      const after = await connection.getBalance(owner.publicKey, 'confirmed');
-      exitSol = (after - before) / LAMPORTS_PER_SOL;
+      const mid = await connection.getBalance(owner.publicKey, 'confirmed');
+      exitSol = sellSignature ? -(await solDelta(sellSignature, before - mid)) : 0;
+      // The rent deposit comes back when the empty account closes; if it can't be closed it is lost.
+      const closed = await reclaimRent(owner, await tokenHoldings(owner.publicKey, position.mint)).catch(e => { log('warn', `${bot.name}: could not close empty ${position.symbol} account: ${e.message}`); return false; });
+      exitSol -= closed ? TX_FEE_SOL : (position.rentSol || 0);
     } else if (position.tokenRaw === '0') {
       exitSol = 0;
     } else if (position.tokenRaw) {
@@ -549,12 +595,13 @@ export function createEngine({
     if (position.sellFailures < 8 || now - position.firstSellFailureAt < 10 * 60_000) return;
     db.trades.push({
       id: randomUUID(), botId: bot.id, mode: position.mode, mint: position.mint, symbol: position.symbol,
-      entrySol: position.sizeSol, exitSol: position.realizedSol || 0, pnlSol: (position.realizedSol || 0) - position.sizeSol,
+      entrySol: position.sizeSol, exitSol: (position.realizedSol || 0) - (position.rentSol || 0), pnlSol: (position.realizedSol || 0) - (position.rentSol || 0) - position.sizeSol,
       multiple: (position.realizedSol || 0) / position.sizeSol, reason: 'unsellable', partialSol: position.realizedSol || 0, features: position.features || null,
       openedAt: position.openedAt, closedAt: iso(), buySignature: position.buySignature || null, sellSignature: null
     });
     db.positions = db.positions.filter(p => p.id !== position.id);
-    const lost = position.sizeSol - (position.realizedSol || 0);
+    // The token account stays open while it holds tokens, so its rent deposit is lost with them.
+    const lost = position.sizeSol + (position.rentSol || 0) - (position.realizedSol || 0);
     bot.stats.trades += 1; bot.stats.losses += 1; bot.stats.realizedPnlSol -= lost;
     log('warn', `${bot.name}: wrote off ${position.symbol} as unsellable (-${lost.toFixed(4)} SOL). Tokens left in the wallet.`);
   }
@@ -569,8 +616,8 @@ export function createEngine({
       const raw = (await tokenHoldings(owner.publicKey, position.mint)).reduce((s, a) => s + a.raw, 0n);
       const amount = raw * pct / 100n;
       if (amount <= 0n) return;
-      await jupiterSwap(owner, position.mint, SOL_MINT, amount.toString(), bot);
-      got = (await connection.getBalance(owner.publicKey, 'confirmed') - before) / LAMPORTS_PER_SOL;
+      const { signature } = await jupiterSwap(owner, position.mint, SOL_MINT, amount.toString(), bot);
+      got = -(await solDelta(signature, before - await connection.getBalance(owner.publicKey, 'confirmed')));
       position.tokenRaw = (await tokenHoldings(owner.publicKey, position.mint)).reduce((s, a) => s + a.raw, 0n).toString();
     } else {
       const amount = BigInt(position.tokenRaw) * pct / 100n;
@@ -706,7 +753,8 @@ export function createEngine({
           try { if (await withWallet(bot, () => openPosition(bot, pair))) bought = true; }
           catch (e) {
             rejected.set(mint, now + (/ 429|budget/.test(e.message) ? 30_000 : 5 * 60_000));
-            const key = /round trip|selling back/.test(e.message) ? 'round_trip' : /impact/.test(e.message) ? 'price_impact' : /route/.test(e.message) ? 'no_route' : 'error';
+            const key = /round trip|selling back/.test(e.message) ? 'round_trip' : /impact/.test(e.message) ? 'price_impact' : /route/.test(e.message) ? 'no_route'
+              : /on top of the trade/.test(e.message) ? 'hidden_cost' : /would fail/.test(e.message) ? 'would_fail' : / 429/.test(e.message) ? 'rate_limited' : 'error';
             skips[key] = (skips[key] || 0) + 1;
             if (key === 'error') log('error', `${bot.name}: buy of ${pair.baseToken?.symbol} failed: ${e.message}`);
           }

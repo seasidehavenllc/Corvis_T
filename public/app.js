@@ -110,6 +110,7 @@ function renderBots() {
         ${b.enabled ? `<button class="btn btn-stop btn-sm" data-act="pause" data-id="${esc(b.id)}">Pause</button>` : `<button class="btn btn-start btn-sm" data-act="start" data-id="${esc(b.id)}">Start</button>`}
         ${b.openPositions ? `<button class="btn btn-stop btn-sm" data-act="sellall" data-id="${esc(b.id)}">Pause &amp; sell all</button>` : ''}
         <button class="btn btn-sm" data-act="details" data-id="${esc(b.id)}">Stats &amp; wallet</button>
+        <button class="btn btn-sm" data-act="withdraw" data-id="${esc(b.id)}">Withdraw</button>
         <button class="btn btn-sm" data-act="edit" data-id="${esc(b.id)}">Edit</button>
         <button class="btn btn-danger btn-sm" data-act="delete" data-id="${esc(b.id)}">Delete</button>
       </div>
@@ -235,6 +236,7 @@ document.addEventListener('click', async e => {
   if (!bot) return;
   try {
     if (act.dataset.act === 'details') return openDetails(bot.id);
+    if (act.dataset.act === 'withdraw') return openDetails(bot.id, { withdraw: true });
     if (act.dataset.act === 'edit') return openBotForm(bot);
     if (!requireUnlock()) return;
     if (act.dataset.act === 'mode') {
@@ -264,7 +266,7 @@ document.addEventListener('click', async e => {
 });
 
 // ---------- details dialog ----------
-async function openDetails(id) {
+async function openDetails(id, { withdraw = false } = {}) {
   detailBotId = id;
   const dlg = $('#detailDialog');
   if (!dlg.open) { $('#dBody').innerHTML = '<p class="muted">Loading…</p>'; dlg.showModal(); }
@@ -289,14 +291,16 @@ async function openDetails(id) {
       <h4>Cumulative P&amp;L</h4>${spark(p.series, 90)}
       <h4 style="margin-top:14px">Open positions</h4><div class="table-card">${positionRows(d.positions.map(x => ({ ...x })), false)}</div>
       <h4 style="margin-top:14px">Trade history</h4><div class="table-card">${tradeRows(d.trades, false)}</div>
-      <h4 style="margin-top:14px">Move funds out</h4>
-      <form id="botWithdraw" class="stack">
+      <h4 style="margin-top:14px">Withdraw (move funds out)</h4>
+      <p class="muted small">Pause the bot and sell its open coins first. This sends SOL only.</p>
+      <form id="botWithdraw" class="stack" novalidate>
         <label>Send SOL to (your wallet address) <input id="bwTo" required autocomplete="off" placeholder="Your Phantom / Solflare address"></label>
-        <div class="row3"><label>Amount SOL <input id="bwAmount" type="number" min="0.000001" step="0.000001"></label><label class="check" style="align-self:end"><input id="bwAll" type="checkbox"> Withdraw everything</label></div>
+        <div class="row3"><label>Amount SOL <input id="bwAmount" type="number" min="0" step="any" inputmode="decimal"></label><label class="check" style="align-self:end"><input id="bwAll" type="checkbox"> Withdraw everything</label></div>
         <label class="check"><input id="bwConfirm" type="checkbox"> I checked the address. Transfers are irreversible.</label>
         <div class="actions" style="justify-content:flex-start"><button class="btn btn-primary" type="submit">Withdraw SOL</button><button class="btn" type="button" id="exportKey">Export private key</button>${state.config?.liveTradingEnabled ? '<button class="btn" type="button" id="testSwap">Test live swap (0.01 SOL)</button>' : ''}</div>
       </form>
       <div id="secretOut"></div>`;
+    if (withdraw) { $('#botWithdraw').scrollIntoView({ block: 'start' }); $('#bwTo').focus(); }
   } catch (err) { $('#dBody').innerHTML = `<div class="alert bad">${esc(err.message)}</div>`; }
 }
 $('#dClose').addEventListener('click', () => { detailBotId = null; $('#detailDialog').close(); });
@@ -305,6 +309,8 @@ $('#detailDialog').addEventListener('submit', async e => {
   if (e.target.id !== 'botWithdraw') return;
   e.preventDefault();
   if (!requireUnlock()) return;
+  if (!$('#bwTo').value.trim()) return toast('Enter the wallet address to send to.', true);
+  if (!$('#bwAll').checked && !(Number($('#bwAmount').value) > 0)) return toast('Enter an amount, or tick "Withdraw everything".', true);
   if (!$('#bwConfirm').checked) return toast('Tick the confirmation box first.', true);
   try {
     const r = await post(`/api/bots/${encodeURIComponent(detailBotId)}/withdraw`, { to: $('#bwTo').value.trim(), amountSol: Number($('#bwAmount').value), all: $('#bwAll').checked, confirm: true });
