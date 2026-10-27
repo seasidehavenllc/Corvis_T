@@ -34,6 +34,15 @@ const PUMP_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'
 const HOLDER_MS = 1_500; // how often the biggest wallets of open positions are re-read for rug signs
 const WATCHED_WALLETS = 20; // biggest wallets watched per position, plus the coin's creator
 const MIN_WATCHED_PCT = 0.1; // ...when they hold at least this much of the supply (bundles spread a dump over many small wallets)
+// Copy trading: wallets a bot follows are checked for new trades this often, and a followed buy stays a
+// reason to buy for this long (later than that, the move has usually happened without us).
+const FOLLOW_MS = 4_000;
+const FOLLOW_TTL_MS = 2 * 60_000;
+export const MAX_FOLLOWED = 10;
+// Coins a followed wallet buys are usually minutes old and still small, so the filters that only judge
+// how established a coin is are left out for them. Mint authority, whale, rug and cost checks still apply.
+const FOLLOW_IGNORES = new Set(['age', 'too_new', 'buys', 'momentum', 'holders', 'organic', 'seeded_pool']);
+const QUOTE_MINTS = new Set([SOL_MINT, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']);
 
 export const STRATEGY_DEFAULTS = {
   mode: 'paper',
@@ -62,6 +71,8 @@ export const STRATEGY_DEFAULTS = {
   maxSingleHolderPct: 10,
   maxLiquidityPerHolderUsd: 150,
   insiderSellPct: 2,
+  followWallets: [],
+  followOnly: false,
   priorityFeeSol: 0.0003,
   maxDailyLossSol: 0.2,
   paperBalanceSol: 1
@@ -109,6 +120,22 @@ export function passesFilters(pair, bot, now = Date.now()) {
   // Momentum: more buyers than sellers in the last 5 minutes.
   if (bot.minBuySellRatio > 0 && buys < bot.minBuySellRatio * Math.max(sells, 1)) reasons.push('momentum');
   return reasons;
+}
+
+// Coins a wallet bought or sold in one parsed transaction, from its token balances before and after.
+// Returns [{ mint, side: 'buy' | 'sell' }]; SOL and stablecoins are what it paid with, not what it traded.
+export function walletTrades(tx, wallet) {
+  if (!tx?.meta || tx.meta.err) return [];
+  const delta = new Map();
+  const add = (list, sign) => {
+    for (const b of list || []) {
+      if (b.owner !== wallet || QUOTE_MINTS.has(b.mint)) continue;
+      delta.set(b.mint, (delta.get(b.mint) || 0n) + sign * BigInt(b.uiTokenAmount?.amount || '0'));
+    }
+  };
+  add(tx.meta.preTokenBalances, -1n);
+  add(tx.meta.postTokenBalances, 1n);
+  return [...delta].filter(([, d]) => d !== 0n).map(([mint, d]) => ({ mint, side: d > 0n ? 'buy' : 'sell' }));
 }
 
 // Holders worth watching for a rug: real wallets, biggest first. Pools, launchpad curves and lockers are
@@ -741,6 +768,11 @@ export function createEngine({
       await closePosition(bot, position, 'rug_warning');
       return;
     }
+    // The wallet we copied into this coin has sold: copy the exit too.
+    if (position.leaderSold) {
+      await closePosition(bot, position, 'leader_sold');
+      return;
+    }
     const timeUp = now - Date.parse(position.openedAt) >= bot.maxHoldMinutes * 60_000;
     const est = estimateMultiple(position);
     // Within 5% of take profit counts as a hint too, so a fast spike is confirmed and sold without waiting.
@@ -802,6 +834,42 @@ export function createEngine({
     }
   }
 
+  // Copy trading: read each followed wallet's newest transactions and note what it bought or sold.
+  // History from before the bot started following is skipped; only new trades count.
+  const leaders = new Map(); // wallet -> newest signature seen
+  const signals = new Map(); // mint -> { wallet, at } of the latest followed buy
+  let lastFollowAt = 0, following = false;
+  async function watchLeaders(now) {
+    if (now - lastFollowAt < FOLLOW_MS) return;
+    lastFollowAt = now;
+    const wallets = new Set(db.bots.filter(b => b.enabled).flatMap(b => b.followWallets || []));
+    for (const p of db.positions) if (p.leader) wallets.add(p.leader);
+    for (const w of leaders.keys()) if (!wallets.has(w)) leaders.delete(w);
+    for (const [m, sig] of signals) if (now - sig.at > FOLLOW_TTL_MS) signals.delete(m);
+    for (const wallet of wallets) {
+      const seen = leaders.get(wallet);
+      const sigs = await marketConnection.getSignaturesForAddress(new PublicKey(wallet), { limit: seen ? 15 : 1, ...(seen ? { until: seen } : {}) }, 'confirmed');
+      if (sigs.length) leaders.set(wallet, sigs[0].signature);
+      if (!seen) { if (!sigs.length) leaders.set(wallet, null); continue; }
+      for (const s of sigs.reverse()) {
+        if (s.err) continue;
+        const tx = await marketConnection.getParsedTransaction(s.signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
+        for (const { mint, side } of walletTrades(tx, wallet)) {
+          if (side === 'buy') {
+            signals.set(mint, { wallet, at: now });
+            log('info', `Followed wallet ${wallet.slice(0, 4)}…${wallet.slice(-4)} bought ${mint}.`);
+          } else {
+            signals.delete(mint);
+            for (const p of db.positions) if (p.leader === wallet && p.mint === mint && !p.leaderSold) {
+              p.leaderSold = true;
+              log('info', `Followed wallet ${wallet.slice(0, 4)}…${wallet.slice(-4)} sold ${p.symbol}; selling ours too.`);
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Fast loop: price every open position and sell the moment an exit rule triggers.
   let lastPriceAt = 0, lastDexAt = 0, lastSaveAt = 0, dexMiss = new Set();
   async function monitor() {
@@ -839,6 +907,8 @@ export function createEngine({
         // Ticks are fast, so state is written at most every 2 s, or straight away when a trade closed.
         if (db.trades.length !== tradeCount || now - lastSaveAt >= 2_000) { lastSaveAt = now; await save(); }
       }
+      // Followed wallets are read in the background so a slow RPC never delays a sell.
+      if (!following) { following = true; watchLeaders(now).catch(e => { health.lastError = `Copy trading: ${e.message}`; }).finally(() => { following = false; }); }
       for (const bot of db.bots.filter(b => b.enabled)) {
         if (todayPnl(db.trades, bot.id, now) <= -bot.maxDailyLossSol) {
           bot.enabled = false; bot.status = 'Stopped · daily loss limit hit';
@@ -871,19 +941,36 @@ export function createEngine({
       if (!hungry.length) return;
       const candidates = await discover(now);
       health.candidates = candidates.size;
+      // Coins a followed wallet just bought may not be in any feed yet: look them up directly.
+      const copied = [...signals.keys()].filter(m => !candidates.has(m));
+      if (copied.length && solUsd) {
+        try { for (const t of await feedJson(`${JUPITER_TOKENS}/search?query=${copied.slice(0, 100).join(',')}`, 30_000) || []) { const p = jupiterPair(t); if (p) candidates.set(p.baseToken.address, p); } }
+        catch { /* feeds cooling down; try next scan */ }
+      }
       // Newest launches first.
       const ordered = [...candidates].sort((a, b) => (b[1].pairCreatedAt || 0) - (a[1].pairCreatedAt || 0));
       let bought = false;
       for (const bot of hungry) {
-        for (const [mint, pair] of ordered) {
+        // Coins a wallet this bot follows just bought come first; a follow-only bot buys nothing else.
+        const follows = new Set(bot.followWallets || []);
+        const leaderOf = mint => { const sig = signals.get(mint); return sig && follows.has(sig.wallet) ? sig.wallet : null; };
+        const mine = ordered.filter(([m]) => leaderOf(m));
+        for (const [mint, pair] of bot.followOnly ? mine : [...mine, ...ordered.filter(([m]) => !leaderOf(m))]) {
           if (!bot.enabled || db.positions.filter(p => p.botId === bot.id).length >= bot.maxOpenPositions) break;
           if (db.positions.some(p => p.botId === bot.id && p.mint === mint)) continue;
           if (db.trades.some(t => t.botId === bot.id && t.mint === mint)) continue;
           if ((rejected.get(mint) || 0) > now) continue;
-          const failed = passesFilters(pair, bot, now);
+          const leader = leaderOf(mint);
+          const failed = passesFilters(pair, bot, now).filter(r => !leader || !FOLLOW_IGNORES.has(r));
           if (failed.length) { skips[failed[0]] = (skips[failed[0]] || 0) + 1; continue; }
           if (!(await mintIsSafe(mint).catch(() => false))) { skips.mint_authority = (skips.mint_authority || 0) + 1; continue; }
-          try { if (await withWallet(bot, () => openPosition(bot, pair))) bought = true; }
+          try {
+            const position = await withWallet(bot, () => openPosition(bot, pair));
+            if (position) {
+              bought = true;
+              if (leader) { position.leader = leader; position.features.copied = true; log('info', `${bot.name} copied ${leader.slice(0, 4)}…${leader.slice(-4)} into ${position.symbol}.`); }
+            }
+          }
           catch (e) {
             rejected.set(mint, now + (/ 429|budget/.test(e.message) ? 30_000 : 5 * 60_000));
             const key = /round trip|selling back/.test(e.message) ? 'round_trip' : /impact/.test(e.message) ? 'price_impact' : /route/.test(e.message) ? 'no_route' : /wallet holds/.test(e.message) ? 'whale'
@@ -955,7 +1042,7 @@ export function createEngine({
       tick();
     },
     stop() { timers.splice(0).forEach(clearInterval); },
-    tick, monitor, scan, health, liveAllowed, jupiterSwap, estimateMultiple,
+    tick, monitor, scan, watchLeaders: () => watchLeaders(clock()), health, liveAllowed, jupiterSwap, estimateMultiple,
     adoptHoldings: (bot, mints) => withWallet(bot, () => adoptHoldings(bot, mints)),
     closePosition: (bot, position, reason) => withWallet(bot, () => db.positions.includes(position) ? closePosition(bot, position, reason) : null)
   };

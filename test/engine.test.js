@@ -390,3 +390,63 @@ test('old coins from the top organic list do not crowd new launches out of the w
   await engine.scan();
   assert.equal(engine.health.watching, 1);
 });
+
+import { walletTrades } from '../engine.js';
+const tokenBal = (owner, mint, amount) => ({ owner, mint, uiTokenAmount: { amount: String(amount) } });
+test('a followed wallet\'s buys and sells are read from its token balances', () => {
+  const w = wallet(), other = wallet();
+  const buy = { meta: { err: null, preTokenBalances: [tokenBal(w, SOL_MINT, 5e9)], postTokenBalances: [tokenBal(w, MINT, 1000), tokenBal(other, MINT, 9e9), tokenBal(w, SOL_MINT, 4e9)] } };
+  assert.deepEqual(walletTrades(buy, w), [{ mint: MINT, side: 'buy' }]); // SOL paid and the pool's side are ignored
+  const sell = { meta: { err: null, preTokenBalances: [tokenBal(w, MINT, 1000)], postTokenBalances: [tokenBal(w, MINT, 0)] } };
+  assert.deepEqual(walletTrades(sell, w), [{ mint: MINT, side: 'sell' }]);
+  assert.deepEqual(walletTrades({ meta: { ...sell.meta, err: { InstructionError: [] } } }, w), []); // failed transaction
+});
+
+test('copy trading: buys what a followed wallet buys and sells when it sells', async () => {
+  const leader = wallet();
+  const chain = fakeChain([{ owner: pool(), amount: 6e14 }]);
+  const history = [{ signature: 'old', err: null }];
+  const txs = new Map();
+  const conn = {
+    ...chain.connection,
+    getSignaturesForAddress: async (pk, { limit, until }) => {
+      assert.equal(pk.toBase58(), leader);
+      const i = until ? history.findIndex(s => s.signature === until) : history.length;
+      return history.slice(0, i).slice(0, limit);
+    },
+    getParsedTransaction: async sig => txs.get(sig)
+  };
+  const quote = url => {
+    const u = new URL(url); const amt = Number(u.searchParams.get('amount'));
+    return { outAmount: String(Math.floor(u.searchParams.get('inputMint') === SOL_MINT ? amt / 1e9 / 0.001 * 1e6 : amt / 1e6 * 0.001 * 1e9)) };
+  };
+  let t = now;
+  // A one-minute-old coin with little trading yet: the default filters would skip it, a copied buy doesn't.
+  const young = pair({ pairCreatedAt: now - 60_000, txns: { m5: { buys: 2, sells: 0 } } });
+  const fetchImpl = async url => ({ ok: true, json: async () => url.includes('/quote') ? quote(url) : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }] : url.includes('token-boosts') ? [] : [young] });
+  const db = { bots: [{ ...STRATEGY_DEFAULTS, id: 'c1', name: 'Copy', enabled: true, maxPositionSol: 0.1, paperBalanceSol: 1, followWallets: [leader], followOnly: true, stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection: conn, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => t });
+  assert.deepEqual(passesFilters(young, db.bots[0], now).length > 0, true);
+
+  await engine.watchLeaders(); // first look: earlier history is not copied
+  await engine.scan();
+  assert.equal(db.positions.length, 0, 'nothing bought before the followed wallet buys');
+
+  t += 5_000;
+  history.unshift({ signature: 'buy', err: null });
+  txs.set('buy', { meta: { err: null, preTokenBalances: [], postTokenBalances: [tokenBal(leader, MINT, 5e9)] } });
+  await engine.watchLeaders();
+  await engine.scan();
+  assert.equal(db.positions.length, 1);
+  assert.equal(db.positions[0].leader, leader);
+
+  t += 5_000;
+  history.unshift({ signature: 'sell', err: null });
+  txs.set('sell', { meta: { err: null, preTokenBalances: [tokenBal(leader, MINT, 5e9)], postTokenBalances: [tokenBal(leader, MINT, 0)] } });
+  await engine.watchLeaders();
+  t += 1_000;
+  await engine.monitor();
+  assert.equal(db.positions.length, 0);
+  assert.equal(db.trades[0].reason, 'leader_sold');
+  assert.equal(db.trades[0].features.copied, true);
+});

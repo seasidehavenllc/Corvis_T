@@ -109,6 +109,7 @@ function renderBots() {
         ${b.partialSellPercent > 0 ? `<span class="chip">bank ${esc(b.partialSellPercent)}% at ${gain(b.partialTakeProfitMultiplier)}</span>` : ''}<span class="chip">sell all at ${gain(b.takeProfitMultiplier)}</span><span class="chip">${b.stopLossFollowsPrice ? 'trailing ' : ''}SL ${esc(b.stopLossPercent)}%</span>
         <span class="chip">${esc(b.maxPositionSol)} SOL/trade</span><span class="chip">liq ≥ $${Number(b.minLiquidityUsd).toLocaleString()}</span>
         <span class="chip">age ≤ ${esc(b.maxPairAgeMinutes)}m</span><span class="chip">hold ≤ ${esc(b.maxHoldMinutes)}m</span>
+        ${b.followWallets?.length ? `<span class="chip">copying ${b.followWallets.length} wallet${b.followWallets.length > 1 ? 's' : ''}${b.followOnly ? ' only' : ''}</span>` : ''}
         ${b.trailingStopPercent ? `<span class="chip">trail ${esc(b.trailingStopPercent)}%</span>` : ''}
         ${b.insiderSellPct > 0 || b.maxSingleHolderPct > 0 ? `<span class="chip">rug guard${b.maxSingleHolderPct > 0 ? ` · 1 wallet ≤ ${esc(b.maxSingleHolderPct)}%` : ''}${b.insiderSellPct > 0 ? ` · sell if insiders dump ${esc(b.insiderSellPct)}%` : ''}</span>` : '<span class="chip">rug guard off</span>'}
       </div>
@@ -147,12 +148,12 @@ function positionRows(positions, withBot = true) {
   if (!positions.length) return '<p class="muted">No open positions.</p>';
   return `<table><thead><tr>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>Rug check</th><th>Spent SOL</th><th title="What selling now would return, after fees">Worth SOL</th><th>P&amp;L</th><th>Held</th><th></th></tr></thead><tbody>${positions.map(p => {
     const m = p.multiple ?? 1;
-    return `<tr>${withBot ? `<td>${esc(p.botName || '')}</td>` : ''}<td>${p.pairUrl ? `<a href="${esc(p.pairUrl)}" target="_blank" rel="noopener">${esc(p.symbol)}</a>` : esc(p.symbol)} <span class="pill">${esc(p.mode)}</span>${p.partialDone ? ' <span class="pill pill-up">part banked</span>' : ''}${p.sellError ? ` <span class="pill pill-down" title="${esc(p.sellError)}">no buyers · retrying</span>` : p.sellFailures ? ' <span class="pill pill-down">sell retrying</span>' : ''}</td><td>${rugPosition(p)}</td><td>${sol(p.sizeSol)}</td>${p.sellError ? '<td class="muted">unknown</td><td class="down">can\'t sell</td>' : `<td>${sol(p.sizeSol * m)}</td><td>${signed((m - 1) * 100, 1)}%</td>`}<td>${ago(p.openedAt)}</td><td><button class="btn btn-sm" data-close="${esc(p.id)}" data-bot="${esc(p.botId)}">Sell now</button></td></tr>`;
+    return `<tr>${withBot ? `<td>${esc(p.botName || '')}</td>` : ''}<td>${p.pairUrl ? `<a href="${esc(p.pairUrl)}" target="_blank" rel="noopener">${esc(p.symbol)}</a>` : esc(p.symbol)} <span class="pill">${esc(p.mode)}</span>${p.leader ? ` <span class="pill" title="Copied from ${esc(p.leader)}">copy</span>` : ''}${p.partialDone ? ' <span class="pill pill-up">part banked</span>' : ''}${p.sellError ? ` <span class="pill pill-down" title="${esc(p.sellError)}">no buyers · retrying</span>` : p.sellFailures ? ' <span class="pill pill-down">sell retrying</span>' : ''}</td><td>${rugPosition(p)}</td><td>${sol(p.sizeSol)}</td>${p.sellError ? '<td class="muted">unknown</td><td class="down">can\'t sell</td>' : `<td>${sol(p.sizeSol * m)}</td><td>${signed((m - 1) * 100, 1)}%</td>`}<td>${ago(p.openedAt)}</td><td><button class="btn btn-sm" data-close="${esc(p.id)}" data-bot="${esc(p.botId)}">Sell now</button></td></tr>`;
   }).join('')}</tbody></table>`;
 }
 function tradeRows(trades, withBot = true) {
   if (!trades.length) return '<p class="muted">No trades yet.</p>';
-  return `<table><thead><tr><th>Closed</th>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>Rug check</th><th>In SOL</th><th>Out SOL</th><th>P&amp;L</th><th>Exit</th><th></th></tr></thead><tbody>${trades.map(t => `<tr><td>${ago(t.closedAt)} ago</td>${withBot ? `<td>${esc(t.botName || '')}</td>` : ''}<td>${esc(t.symbol)} <span class="pill">${esc(t.mode)}</span></td><td>${rugTrade(t)}</td><td>${sol(t.entrySol)}</td><td>${sol(t.exitSol)}</td><td>${signed(t.pnlSol)}</td><td>${esc(REASONS[t.reason] || String(t.reason).replace('_', ' '))}${t.partialSol ? ' <span class="muted small">(part banked)</span>' : ''}</td><td>${explorer(t.sellSignature)}</td></tr>`).join('')}</tbody></table>`;
+  return `<table><thead><tr><th>Closed</th>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>Rug check</th><th>In SOL</th><th>Out SOL</th><th>P&amp;L</th><th>Exit</th><th></th></tr></thead><tbody>${trades.map(t => `<tr><td>${ago(t.closedAt)} ago</td>${withBot ? `<td>${esc(t.botName || '')}</td>` : ''}<td>${esc(t.symbol)} <span class="pill">${esc(t.mode)}</span>${t.features?.copied ? ' <span class="pill">copy</span>' : ''}</td><td>${rugTrade(t)}</td><td>${sol(t.entrySol)}</td><td>${sol(t.exitSol)}</td><td>${signed(t.pnlSol)}</td><td>${esc(REASONS[t.reason] || String(t.reason).replace('_', ' '))}${t.partialSol ? ' <span class="muted small">(part banked)</span>' : ''}</td><td>${explorer(t.sellSignature)}</td></tr>`).join('')}</tbody></table>`;
 }
 // Which entry signals have actually paid off, from this server's own closed trades.
 function renderJournal() {
@@ -182,7 +183,7 @@ const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl:
 // Profit targets are entered as a % gain (50 = +50%) and stored as a multiple (1.5×).
 const GAIN_FIELDS = new Set(['fTp', 'fPartTp']);
 const gain = m => `+${+((m - 1) * 100).toFixed(1)}%`;
-const REASONS = { take_profit: 'take profit', stop_loss: 'stop loss', trailing_stop: 'trailing stop', max_hold: 'time limit', protect_profit: 'kept profit', unsellable: 'unsellable', manual: 'sold by you', rug_warning: 'rug warning' };
+const REASONS = { take_profit: 'take profit', stop_loss: 'stop loss', trailing_stop: 'trailing stop', max_hold: 'time limit', protect_profit: 'kept profit', unsellable: 'unsellable', manual: 'sold by you', rug_warning: 'rug warning', leader_sold: 'copied wallet sold' };
 const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.5, stopLossPercent: 12, stopLossFollowsPrice: true, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 15000, maxPairAgeMinutes: 60, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.5, priorityFeeSol: 0.0003, maxPriceImpactPct: 8, maxRoundTripPct: 4, minHolders: 100, maxTopHoldersPct: 30, partialTakeProfitMultiplier: 1.15, partialSellPercent: 50, maxDevHoldingPct: 5, maxDevLaunches: 10, minOrganicScore: 0, minPairAgeMinutes: 5, maxSingleHolderPct: 10, insiderSellPct: 2, maxLiquidityPerHolderUsd: 150 };
 function requireUnlock() { if (adminToken) return true; $('#unlockDialog').showModal(); return false; }
 function openBotForm(bot) {
@@ -195,6 +196,8 @@ function openBotForm(bot) {
     $(`#${id}`).value = GAIN_FIELDS.has(id) ? +((v - 1) * 100).toFixed(2) : v;
   }
   $('#fSlFollow').checked = (bot || defaults).stopLossFollowsPrice ?? defaults.stopLossFollowsPrice;
+  $('#fFollow').value = (bot?.followWallets || []).join('\n');
+  $('#fFollowOnly').checked = Boolean(bot?.followOnly);
   feeHint();
   botError('');
   $('#botDialog').showModal();
@@ -232,7 +235,7 @@ $('#botForm').addEventListener('submit', async e => {
   e.preventDefault();
   botError('');
   if (!checkBotForm()) return;
-  const body = { stopLossFollowsPrice: $('#fSlFollow').checked };
+  const body = { stopLossFollowsPrice: $('#fSlFollow').checked, followWallets: $('#fFollow').value.split(/[\s,]+/).filter(Boolean), followOnly: $('#fFollowOnly').checked };
   for (const [id, key] of Object.entries(fields)) {
     const v = $(`#${id}`).value;
     body[key] = id === 'fName' || id === 'fMode' ? v : GAIN_FIELDS.has(id) ? 1 + Number(v) / 100 : Number(v);
