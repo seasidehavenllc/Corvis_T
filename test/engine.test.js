@@ -23,7 +23,8 @@ test('entry filters reject thin, old or quiet pairs', () => {
   assert.deepEqual(passesFilters(pair(), bot, now), []);
   assert.deepEqual(passesFilters(pair({ liquidity: { usd: 10 } }), bot, now), ['liquidity']);
   assert.deepEqual(passesFilters(pair({ pairCreatedAt: now - 3 * 3600_000 }), bot, now), ['age']);
-  assert.deepEqual(passesFilters(pair({ txns: { m5: { buys: 1 } } }), bot, now), ['buys']);
+  assert.deepEqual(passesFilters(pair({ txns: { m5: { buys: 1 } } }), bot, now), ['buys', 'momentum']);
+  assert.deepEqual(passesFilters(pair({ txns: { m5: { buys: 40, sells: 60 } } }), bot, now), ['momentum']);
 });
 test('exit rules: take profit, stop loss, max hold', () => {
   const pos = { entryPrice: 1, openedAt: new Date(now - 60_000).toISOString() };
@@ -31,6 +32,13 @@ test('exit rules: take profit, stop loss, max hold', () => {
   assert.equal(exitReason(pos, bot, 0.8, now), 'stop_loss');
   assert.equal(exitReason(pos, bot, 1.1, now), null);
   assert.equal(exitReason({ ...pos, openedAt: new Date(now - 2 * 3600_000).toISOString() }, bot, 1.1, now), 'max_hold');
+});
+test('trailing stop arms after a rise and sells on pullback from the peak', () => {
+  const b = { ...bot, takeProfitMultiplier: 3, trailingStopPercent: 10 };
+  const pos = { entryPrice: 1, openedAt: new Date(now - 60_000).toISOString() };
+  assert.equal(exitReason({ ...pos, peakPrice: 1.05 }, b, 0.95, now), null); // not armed yet
+  assert.equal(exitReason({ ...pos, peakPrice: 1.5 }, b, 1.4, now), null);   // 6.7% off peak
+  assert.equal(exitReason({ ...pos, peakPrice: 1.5 }, b, 1.34, now), 'trailing_stop');
 });
 test('todayPnl only counts today', () => {
   const trades = [{ botId: 'b1', pnlSol: -0.1, closedAt: '2026-10-27T01:00:00Z' }, { botId: 'b1', pnlSol: -5, closedAt: '2026-10-26T01:00:00Z' }];

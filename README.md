@@ -3,16 +3,20 @@
 A Solana sniper bot dashboard. Each bot has its own encrypted wallet, scans newly listed tokens, filters out unsafe ones, buys, and exits on take profit, stop loss or a time limit. Bots run in **paper** mode (simulated trades on live market prices) or **live** mode (real swaps through Jupiter).
 
 ## How a bot trades
-Every `ENGINE_TICK_MS` (15 s by default) the engine:
-1. **Manages open positions** for every bot, including paused ones. It prices each one from DexScreener and sells on take profit (×), stop loss (%) or max hold time.
-2. **Checks the daily loss limit**. A bot whose realized P&L today is at or below `-maxDailyLossSol` is stopped.
-3. **Finds new tokens** from DexScreener's latest token profiles and boosts on Solana, using the most liquid SOL pair for each.
-4. **Filters** them with each bot's settings: minimum USD liquidity, maximum pair age, and minimum buys in the last 5 minutes. A token is also skipped unless its **mint authority and freeze authority are both revoked**, so the creator can't mint more supply or freeze your tokens. A bot never buys the same token twice.
-5. **Buys** `maxPositionSol`, up to `maxOpenPositions` at once.
-   - Paper: simulated at the DexScreener price, with a 1% cost on each side for slippage and fees, against the bot's 1 SOL paper balance.
-   - Live: quoted and swapped through Jupiter, signed with the bot wallet. P&L is measured from the wallet's real SOL balance change, so fees are included.
+The engine runs two loops:
+- **Every 2 s (`ENGINE_MONITOR_MS`)** it reprices every open position, including those of paused bots, and sells on take profit (×), stop loss (%), trailing stop (% off the peak, which arms once the position is up by that much) or max hold time. A bot whose realized loss today reaches `maxDailyLossSol` is stopped.
+- **Every 5 s (`ENGINE_SCAN_MS`)** it refreshes a watchlist of up to 120 new tokens from GeckoTerminal's new pools and DexScreener's latest profiles and boosts. Every watched token is re-checked on each scan, so a launch that starts quiet can still be bought once it picks up. Newest launches are checked first.
 
-The dashboard shows each bot's balance, P&L curve, trades, win rate, average and best/worst trade, average hold time, and open positions. Each position has a "Sell now" button.
+A token is bought only if it passes the bot's filters: minimum USD liquidity, maximum pair age, minimum buys in the last 5 minutes, and a buy/sell ratio (momentum). Its **mint and freeze authority must also both be revoked**. A bot never buys the same token twice.
+
+- **Paper:** simulated at the DexScreener price with a 1% cost on each side, against the bot's 1 SOL paper balance.
+- **Live:** quoted and swapped through Jupiter with a `veryHigh` priority fee (capped per bot) and dynamic slippage. Transactions skip preflight and are rebroadcast every 2 s until confirmed or expired. Entry price is the price actually paid. P&L comes from the wallet's real SOL change, and emptied token accounts are closed so their ~0.002 SOL rent comes back. One bot's swaps never overlap. A position that fails to sell 5 times in a row (usually a rug with no liquidity left) is booked as a total loss, and its tokens stay in the wallet.
+
+## Testing it
+- `npm test` runs unit tests plus three simulated market sessions. Each checks that live P&L matches the wallet balance exactly, that no token with an active mint authority is ever bought, and that every position gets closed.
+- `npm run simulate [hours] [seed]` runs a synthetic memecoin market through the real engine, live code path included, and prints each bot's results. The market model is a test harness, not a profit forecast.
+- **System check** in the dashboard (or `SELFTEST_ON_BOOT=true`, which logs `SELFTEST` lines) hits the real feeds, Jupiter and the RPC. It builds a real swap transaction and simulates it on mainnet without spending anything.
+- **Test live swap** in a bot's *Stats & wallet* panel appears when live trading is on. It does a real 0.01 SOL → USDC → SOL round trip with the bot's wallet and reports the timings and cost.
 
 ## Keeping your money safe
 - **Wallets can't be lost:** every bot wallet is derived from `WALLET_ENCRYPTION_KEY` plus a wallet number. If the database is wiped (Render's free plan does this whenever it sleeps or redeploys), the server checks the blockchain on startup and re-adds every bot wallet that still holds SOL or tokens, as "Recovered wallet #N". Back up `WALLET_ENCRYPTION_KEY`: it is the master key for all bot wallets.

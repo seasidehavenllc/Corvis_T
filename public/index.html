@@ -56,6 +56,11 @@
         <div id="policy" class="muted">Loading…</div>
       </div>
       <div class="card">
+        <h3>System check</h3>
+        <div id="selftest" class="muted small">Checks the price feeds, Jupiter and Solana RPC with no money spent.</div>
+        <div class="bot-actions" style="margin-top:8px"><button id="selftestBtn" class="btn btn-sm" type="button">Run system check</button></div>
+      </div>
+      <div class="card">
         <h3>Backup</h3>
         <p class="muted small">Wallets are always recoverable from your encryption key. A backup also keeps bot settings and trade history.</p>
         <div class="bot-actions"><button id="backupBtn" class="btn btn-sm" type="button">Download backup</button><button id="restoreBtn" class="btn btn-sm" type="button">Restore</button></div>
@@ -80,8 +85,9 @@
     <div class="row3">
       <label>Take profit (×) <input id="fTp" type="number" min="1.01" max="10" step=".01" value="1.45" required></label>
       <label>Stop loss (%) <input id="fSl" type="number" min=".1" max="100" step=".1" value="15" required></label>
-      <label>Max hold (min) <input id="fHold" type="number" min="1" max="10080" step="1" value="60" required></label>
+      <label>Max hold (min) <input id="fHold" type="number" min="1" max="10080" step="1" value="30" required></label>
     </div>
+    <label>Trailing stop (% off peak, 0 = off) <input id="fTrail" type="number" min="0" max="99" step="1" value="12" required></label>
     <h4>Sizing &amp; risk</h4>
     <div class="row3">
       <label>Position size (SOL) <input id="fMax" type="number" min=".001" max="10" step=".001" value=".05" required></label>
@@ -94,7 +100,11 @@
       <label>Max pair age (min) <input id="fAge" type="number" min="1" max="10080" step="1" value="30" required></label>
       <label>Min buys (last 5m) <input id="fBuys" type="number" min="0" step="1" value="10" required></label>
     </div>
-    <label>Slippage (bps) <input id="fSlip" type="number" min="10" max="5000" step="10" value="300" required></label>
+    <div class="row3">
+      <label>Min buy/sell ratio <input id="fRatio" type="number" min="0" max="20" step=".1" value="1.2" required></label>
+      <label>Slippage (bps) <input id="fSlip" type="number" min="10" max="5000" step="10" value="500" required></label>
+      <label>Priority fee (max SOL) <input id="fPrio" type="number" min="0" max="0.01" step="0.0001" value="0.0005" required></label>
+    </div>
     <p class="muted small">Tokens are skipped unless mint and freeze authority are revoked. Each bot has its own encrypted wallet; you can withdraw or export its key at any time.</p>
     <div class="actions">
       <button class="btn btn-ghost" value="cancel" formnovalidate>Cancel</button>

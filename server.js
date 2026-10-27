@@ -2,6 +2,7 @@ import express from 'express';
 import { calculateDevFeeLamports } from './policy.js';
 import { createEngine, STRATEGY_DEFAULTS } from './engine.js';
 import { deriveBotKeypair as deriveFromKey, scanDerivedWallets } from './wallets.js';
+import { runSelfTest } from './selftest.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -231,8 +232,12 @@ function validateBotSettings(body, current = {}) {
   const strategy = {
     minLiquidityUsd: pick('minLiquidityUsd'), maxPairAgeMinutes: pick('maxPairAgeMinutes'), minBuys5m: pick('minBuys5m'),
     maxOpenPositions: pick('maxOpenPositions'), maxHoldMinutes: pick('maxHoldMinutes'), slippageBps: pick('slippageBps'),
-    maxDailyLossSol: pick('maxDailyLossSol')
+    maxDailyLossSol: pick('maxDailyLossSol'), minBuySellRatio: pick('minBuySellRatio'),
+    trailingStopPercent: pick('trailingStopPercent'), priorityFeeSol: pick('priorityFeeSol')
   };
+  if (!(strategy.minBuySellRatio >= 0 && strategy.minBuySellRatio <= 20)) return { error: 'Buy/sell ratio must be between 0 and 20.' };
+  if (!(strategy.trailingStopPercent >= 0 && strategy.trailingStopPercent < 100)) return { error: 'Trailing stop must be 0 (off) to 99%.' };
+  if (!(strategy.priorityFeeSol >= 0 && strategy.priorityFeeSol <= 0.01)) return { error: 'Priority fee must be between 0 and 0.01 SOL.' };
   if (!(strategy.minLiquidityUsd >= 0)) return { error: 'Minimum liquidity must be 0 or more.' };
   if (!(strategy.maxPairAgeMinutes > 0 && strategy.maxPairAgeMinutes <= 10080)) return { error: 'Max pair age must be between 1 minute and 7 days.' };
   if (!(strategy.minBuys5m >= 0)) return { error: 'Minimum buys must be 0 or more.' };
@@ -435,6 +440,45 @@ app.post('/api/wallet/withdraw', requireAdmin, async (req, res) => {
     res.json({ ok: true, signature, explorerUrl: `https://explorer.solana.com/tx/${signature}?cluster=${network}` });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
+let lastSelfTest = null;
+async function selfTest() {
+  let walletAddress = db.bots[0]?.walletAddress;
+  if (!walletAddress) try { walletAddress = deriveBotKeypair(0).publicKey.toBase58(); } catch {}
+  lastSelfTest = await runSelfTest({ connection, marketConnection, walletAddress });
+  for (const s of lastSelfTest.steps) console.log(`SELFTEST ${s.ok ? 'PASS' : 'FAIL'} ${s.name} (${s.ms} ms): ${s.detail}`);
+  log(lastSelfTest.ok ? 'info' : 'warn', `System check ${lastSelfTest.ok ? 'passed' : 'found problems'}: ${lastSelfTest.steps.filter(s => s.ok).length}/${lastSelfTest.steps.length} checks OK.`);
+  return lastSelfTest;
+}
+app.get('/api/selftest', (_req, res) => res.json(lastSelfTest || { steps: [] }));
+app.post('/api/selftest', requireAdmin, async (_req, res) => {
+  try { res.json(await selfTest()); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+// Real 0.01 SOL → USDC → SOL round trip through the same swap code the bots use.
+app.post('/api/bots/:id/test-swap', requireAdmin, async (req, res) => {
+  const bot = db.bots.find(b => b.id === req.params.id);
+  if (!bot) return res.status(404).json({ error: 'Bot not found.' });
+  if (req.body?.confirm !== true) return res.status(400).json({ error: 'Explicit confirmation required.' });
+  if (!LIVE_TRADING_ENABLED) return res.status(409).json({ error: 'Live trading is off on this server, so a real swap can\'t run.' });
+  if (bot.enabled) return res.status(409).json({ error: 'Pause the bot first.' });
+  const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  try {
+    const owner = botKeypair(bot);
+    const before = await connection.getBalance(owner.publicKey, 'confirmed');
+    if (before < 0.02 * LAMPORTS_PER_SOL) return res.status(400).json({ error: 'Fund the bot wallet with at least 0.02 SOL first.' });
+    const t0 = Date.now();
+    const buy = await engine.jupiterSwap(owner, 'So11111111111111111111111111111111111111112', USDC, 10_000_000, { ...bot, slippageBps: 100 });
+    const buyMs = Date.now() - t0;
+    const accounts = await connection.getParsedTokenAccountsByOwner(owner.publicKey, { mint: new PublicKey(USDC) }, 'confirmed');
+    const raw = accounts.value.reduce((s, a) => s + BigInt(a.account.data.parsed?.info?.tokenAmount?.amount || '0'), 0n);
+    const t1 = Date.now();
+    const sell = await engine.jupiterSwap(owner, USDC, 'So11111111111111111111111111111111111111112', raw.toString(), { ...bot, slippageBps: 100 });
+    const sellMs = Date.now() - t1;
+    const after = await connection.getBalance(owner.publicKey, 'confirmed');
+    const result = { ok: true, buySignature: buy.signature, sellSignature: sell.signature, buyMs, sellMs, costSol: (before - after) / LAMPORTS_PER_SOL };
+    log('info', `${bot.name} live test swap OK: buy ${buyMs} ms, sell ${sellMs} ms, cost ${result.costSol} SOL (fees + USDC account rent, reclaimable).`);
+    res.json(result);
+  } catch (e) { log('error', `${bot.name} live test swap failed: ${e.message}`); res.status(502).json({ error: e.message }); }
+});
 app.get('/api/backup', requireAdmin, (_req, res) => {
   res.set('content-disposition', `attachment; filename="corvis-backup-${new Date().toISOString().slice(0, 10)}.json"`);
   res.json({ format: 'corvis-backup-1', exportedAt: new Date().toISOString(), db });
@@ -460,11 +504,12 @@ app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: e
 const engine = createEngine({
   db: new Proxy({}, { get: (_t, k) => db[k], set: (_t, k, v) => { db[k] = v; return true; } }),
   save: saveDb, log, connection, marketConnection, getKeypair: botKeypair, liveAllowed: LIVE_TRADING_ENABLED,
-  tickMs: Number(process.env.ENGINE_TICK_MS || 15000)
+  monitorMs: Number(process.env.ENGINE_MONITOR_MS || 2000), scanMs: Number(process.env.ENGINE_SCAN_MS || 5000)
 });
 await loadDb();
 engine.start();
 recoverWallets();
+if (process.env.SELFTEST_ON_BOOT === 'true') setTimeout(() => selfTest().catch(e => console.log(`SELFTEST crashed: ${e.message}`)), 3000);
 if (!/^[a-f0-9]{64}$/i.test(ENCRYPTION_KEY)) log('warn', 'WALLET_ENCRYPTION_KEY is missing or invalid; bot wallets cannot be created.');
 if (!ADMIN_TOKEN) log('warn', 'ADMIN_API_TOKEN is not set; all wallet-changing actions are locked.');
 if (!process.env.DATA_DIR) log('warn', 'No persistent disk: trade history resets when the server restarts. Bot wallets are recovered automatically; download a backup to keep history.');

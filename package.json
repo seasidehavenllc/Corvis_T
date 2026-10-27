@@ -7,8 +7,9 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check engine.js && node --check public/app.js",
-    "test": "node --test"
+    "check": "node --check server.js && node --check engine.js && node --check wallets.js && node --check public/app.js",
+    "test": "node --test",
+    "simulate": "node sim/run.js"
   },
   "dependencies": {
     "@solana/spl-token": "^0.4.13",

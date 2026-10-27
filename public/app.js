@@ -98,6 +98,7 @@ function renderBots() {
         <span class="chip">TP ${esc(b.takeProfitMultiplier)}×</span><span class="chip">SL ${esc(b.stopLossPercent)}%</span>
         <span class="chip">${esc(b.maxPositionSol)} SOL/trade</span><span class="chip">liq ≥ $${Number(b.minLiquidityUsd).toLocaleString()}</span>
         <span class="chip">age ≤ ${esc(b.maxPairAgeMinutes)}m</span><span class="chip">hold ≤ ${esc(b.maxHoldMinutes)}m</span>
+        ${b.trailingStopPercent ? `<span class="chip">trail ${esc(b.trailingStopPercent)}%</span>` : ''}
       </div>
       <div class="bot-actions">
         ${b.enabled ? `<button class="btn btn-stop btn-sm" data-act="pause" data-id="${esc(b.id)}">Pause</button>` : `<button class="btn btn-start btn-sm" data-act="start" data-id="${esc(b.id)}">Start</button>`}
@@ -137,8 +138,8 @@ function renderSide() {
 }
 
 // ---------- bot form ----------
-const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl: 'stopLossPercent', fHold: 'maxHoldMinutes', fMax: 'maxPositionSol', fOpen: 'maxOpenPositions', fLoss: 'maxDailyLossSol', fLiq: 'minLiquidityUsd', fAge: 'maxPairAgeMinutes', fBuys: 'minBuys5m', fSlip: 'slippageBps' };
-const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.45, stopLossPercent: 15, maxHoldMinutes: 60, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 5000, maxPairAgeMinutes: 30, minBuys5m: 10, slippageBps: 300 };
+const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl: 'stopLossPercent', fHold: 'maxHoldMinutes', fMax: 'maxPositionSol', fOpen: 'maxOpenPositions', fLoss: 'maxDailyLossSol', fLiq: 'minLiquidityUsd', fAge: 'maxPairAgeMinutes', fBuys: 'minBuys5m', fSlip: 'slippageBps', fTrail: 'trailingStopPercent', fRatio: 'minBuySellRatio', fPrio: 'priorityFeeSol' };
+const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.45, stopLossPercent: 15, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 5000, maxPairAgeMinutes: 30, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.2, priorityFeeSol: 0.0005 };
 function requireUnlock() { if (adminToken) return true; $('#unlockDialog').showModal(); return false; }
 function openBotForm(bot) {
   if (!requireUnlock()) return;
@@ -224,7 +225,7 @@ async function openDetails(id) {
         <label>Send SOL to (your wallet address) <input id="bwTo" required autocomplete="off" placeholder="Your Phantom / Solflare address"></label>
         <div class="row3"><label>Amount SOL <input id="bwAmount" type="number" min="0.000001" step="0.000001"></label><label class="check" style="align-self:end"><input id="bwAll" type="checkbox"> Withdraw everything</label></div>
         <label class="check"><input id="bwConfirm" type="checkbox"> I checked the address. Transfers are irreversible.</label>
-        <div class="actions" style="justify-content:flex-start"><button class="btn btn-primary" type="submit">Withdraw SOL</button><button class="btn" type="button" id="exportKey">Export private key</button></div>
+        <div class="actions" style="justify-content:flex-start"><button class="btn btn-primary" type="submit">Withdraw SOL</button><button class="btn" type="button" id="exportKey">Export private key</button>${state.config?.liveTradingEnabled ? '<button class="btn" type="button" id="testSwap">Test live swap (0.01 SOL)</button>' : ''}</div>
       </form>
       <div id="secretOut"></div>`;
   } catch (err) { $('#dBody').innerHTML = `<div class="alert bad">${esc(err.message)}</div>`; }
@@ -242,6 +243,13 @@ $('#detailDialog').addEventListener('submit', async e => {
   } catch (err) { toast(err.message, true); }
 });
 $('#detailDialog').addEventListener('click', async e => {
+  if (e.target.id !== 'testSwap') return;
+  if (!requireUnlock() || !confirm('Swap 0.01 SOL to USDC and back for real, using this bot\'s wallet? It costs a few thousandths of a SOL in fees.')) return;
+  e.target.disabled = true; e.target.textContent = 'Swapping…';
+  try { const r = await post(`/api/bots/${encodeURIComponent(detailBotId)}/test-swap`, { confirm: true }); toast(`Live swap OK: buy ${r.buyMs} ms, sell ${r.sellMs} ms, cost ${r.costSol.toFixed(5)} SOL`); openDetails(detailBotId); }
+  catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = 'Test live swap (0.01 SOL)'; }
+});
+$('#detailDialog').addEventListener('click', async e => {
   if (e.target.id !== 'exportKey') return;
   if (!requireUnlock()) return;
   if (!confirm('Show this bot wallet\'s private key? Anyone who sees it can take the funds. Only do this on a private screen.')) return;
@@ -250,6 +258,20 @@ $('#detailDialog').addEventListener('click', async e => {
     $('#secretOut').innerHTML = `<p class="small muted">Import into Phantom or Solflare as a private key. Store it offline; don't paste it anywhere else.</p><div class="secret mono">${esc(r.secretKeyBase58)}</div>`;
   } catch (err) { toast(err.message, true); }
 });
+
+// ---------- system check ----------
+function renderSelfTest(r) {
+  if (!r?.steps?.length) return;
+  $('#selftest').innerHTML = `<p class="small ${r.ok ? 'up' : 'down'}">${r.ok ? 'All checks passed' : 'Some checks failed'} · ${ago(r.at)} ago</p>` +
+    r.steps.map(s => `<p class="small" style="margin:6px 0"><b class="${s.ok ? 'up' : 'down'}">${s.ok ? '✓' : '✗'}</b> ${esc(s.name)} <span class="muted">${s.ms} ms</span><br><span class="muted">${esc(s.detail)}</span></p>`).join('');
+}
+$('#selftestBtn').addEventListener('click', async e => {
+  if (!requireUnlock()) return;
+  e.target.disabled = true; e.target.textContent = 'Checking…';
+  try { renderSelfTest(await post('/api/selftest', {})); } catch (err) { toast(err.message, true); }
+  e.target.disabled = false; e.target.textContent = 'Run system check';
+});
+api('/api/selftest').then(renderSelfTest).catch(() => {});
 
 // ---------- backup & restore ----------
 $('#backupBtn').addEventListener('click', async () => {
