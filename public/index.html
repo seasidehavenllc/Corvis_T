@@ -99,7 +99,7 @@
     <div class="row3">
       <label>Stop loss (%) <input id="fSl" type="number" min=".1" max="100" step="any" value="12" required></label>
       <label>Max hold (min) <input id="fHold" type="number" min="1" max="10080" step="any" value="30" required></label>
-      <label>Skip pairs younger than (min) <input id="fMinAge" type="number" min="0" max="10079" step="any" value="0" required></label>
+      <label>Skip pairs younger than (min) <input id="fMinAge" type="number" min="0" max="10079" step="any" value="10" required></label>
     </div>
     <label class="check"><input id="fSlFollow" type="checkbox" checked> Stop loss follows the price up (measured from the highest point, not the buy price)</label>
     <label>Trailing stop (% off peak, 0 = off) <input id="fTrail" type="number" min="0" max="99" step="any" value="12" required></label>
@@ -113,7 +113,7 @@
     <div class="row3">
       <label>Min liquidity (USD) <input id="fLiq" type="number" min="0" step="any" value="8000" required></label>
       <label>Max pair age (min) <input id="fAge" type="number" min="1" max="10080" step="any" value="30" required></label>
-      <label>Min buys (last 5m) <input id="fBuys" type="number" min="0" step="any" value="10" required></label>
+      <label>Min buys (last 5m) <input id="fBuys" type="number" min="0" step="any" value="30" required></label>
     </div>
     <div class="row3">
       <label>Min buy/sell ratio <input id="fRatio" type="number" min="0" max="20" step="any" value="1.5" required></label>
@@ -121,9 +121,9 @@
       <label>Priority fee (max SOL) <input id="fPrio" type="number" min="0" max="0.01" step="any" value="0.0003" required></label>
     </div>
     <div class="row3">
-      <label>Max price impact (%, 0 = off) <input id="fImpact" type="number" min="0" max="100" step="any" value="8" required></label>
-      <label>Max round-trip cost (%, 0 = off) <input id="fRound" type="number" min="0" max="100" step="any" value="4" required></label>
-      <label>Min holders <input id="fHolders" type="number" min="0" step="any" value="40" required></label>
+      <label>Max price impact (%, 0 = off) <input id="fImpact" type="number" min="0" max="100" step="any" value="4" required></label>
+      <label>Max round-trip cost (%, 0 = off) <input id="fRound" type="number" min="0" max="100" step="any" value="3" required></label>
+      <label>Min holders <input id="fHolders" type="number" min="0" step="any" value="250" required></label>
     </div>
     <h4>Rug filters</h4>
     <div class="row3">
@@ -132,7 +132,7 @@
       <label>Max tokens the dev launched <input id="fDevMints" type="number" min="0" step="any" value="20" required></label>
     </div>
     <label>Min organic score (0–100, 0 = off) <input id="fOrganic" type="number" min="0" max="100" step="any" value="0" required></label>
-    <label>Max pool $ per holder (0 = off) <input id="fLiqHolder" type="number" min="0" step="any" value="150" required></label>
+    <label>Max pool $ per holder (0 = off) <input id="fLiqHolder" type="number" min="0" step="any" value="100" required></label>
     <label>Max held by one wallet (%, 0 = off) <input id="fWhale" type="number" min="0" max="100" step="any" value="10" required></label>
     <label>Rug warning: sell when top wallets dump (% of supply, 0 = off) <input id="fInsider" type="number" min="0" max="100" step="any" value="5" required></label>
     <label class="check"><input id="fNeedHolders" type="checkbox" checked> Skip coins whose holder count can't be checked (every one-tick wipeout so far was one)</label>

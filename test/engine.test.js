@@ -285,7 +285,7 @@ test('a big pool with few holders is skipped as creator-seeded', () => {
   // Cmatdesk: $62k pool, 183 holders ($339 each) at 5 minutes old, then rugged -97%.
   const seeded = pair({ pairCreatedAt: now - 6 * 60_000, liquidity: { usd: 62000 }, holders: 183, topHoldersPct: 4, devPct: 0 });
   assert.ok(passesFilters(seeded, d, now).includes('seeded_pool'));
-  assert.ok(!passesFilters({ ...seeded, holders: 600 }, d, now).includes('seeded_pool'));
+  assert.ok(!passesFilters({ ...seeded, holders: 700 }, d, now).includes('seeded_pool'));
   assert.ok(!passesFilters(seeded, { ...d, maxLiquidityPerHolderUsd: 0 }, now).includes('seeded_pool'));
 });
 test('the Jupiter token feed works with no open positions (SOL price is fetched on its own)', async () => {
@@ -309,7 +309,7 @@ test('the Jupiter token feed works with no open positions (SOL price is fetched 
 // Every coin that went to zero in one tick (DOCK, DOGE, "4", jenny) came from a feed with no holder count.
 test('a coin with no holder count is skipped unless Jupiter can supply one', () => {
   const d = { ...STRATEGY_DEFAULTS };
-  const blind = pair({ pairCreatedAt: now - 6 * 60_000, liquidity: { usd: 24000 }, holders: undefined, txns: { m5: { buys: 640, sells: 280 } } });
+  const blind = pair({ pairCreatedAt: now - 12 * 60_000, liquidity: { usd: 24000 }, holders: undefined, txns: { m5: { buys: 640, sells: 280 } } });
   assert.deepEqual(passesFilters(blind, d, now), ['unknown_holders']);
   assert.deepEqual(passesFilters(blind, { ...d, requireHolderData: false }, now), []);
 });
