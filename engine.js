@@ -16,6 +16,7 @@ export const JUPITER_HEADERS = JUP_KEY ? { 'x-api-key': JUP_KEY } : {};
 export const JUPITER_RPM = Number(process.env.JUPITER_RPM || (JUP_KEY ? 60 : 50));
 const TX_FEE_SOL = 0.000005;
 const LOCKED_FLOOR = 1.02; // whole-trade multiple kept once the first target is banked
+const NO_ROUTE = 'No Jupiter route for this token: nobody can buy it right now (its pool is drained or moving). The bot keeps retrying.';
 const AUDIT_KEYS = ['holders', 'topHoldersPct', 'devPct', 'devMints', 'isSus', 'organicScore', 'traders5m', 'organicBuyers5m'];
 const SEEN_TTL_MS = 30 * 60 * 1000;
 const WATCHLIST_MAX = 120;
@@ -26,6 +27,7 @@ export const STRATEGY_DEFAULTS = {
   mode: 'paper',
   takeProfitMultiplier: 1.5,
   stopLossPercent: 15,
+  stopLossFollowsPrice: true,
   maxPositionSol: 0.05,
   minLiquidityUsd: 8000,
   maxPairAgeMinutes: 30,
@@ -98,7 +100,10 @@ export function exitReason(position, bot, multiple, now = Date.now()) {
   if (multiple >= bot.takeProfitMultiplier) return 'take_profit';
   // After the first target has been banked, the rest of the position may not turn the trade into a loss.
   if (position.partialDone && multiple <= LOCKED_FLOOR) return 'protect_profit';
-  if (multiple <= 1 - bot.stopLossPercent / 100) return 'stop_loss';
+  // A stop loss that follows the price sits that far below the highest value the trade has reached,
+  // so it moves up as the price climbs and never moves down.
+  const stopBase = bot.stopLossFollowsPrice ? Math.max(1, peak) : 1;
+  if (multiple <= stopBase * (1 - bot.stopLossPercent / 100)) return stopBase > 1 ? 'trailing_stop' : 'stop_loss';
   // Trailing stop arms once the position is up by the trail distance. It then sells on that much pullback
   // from the peak, and never lets an armed winner fall back below break-even.
   const trail = (bot.trailingStopPercent || 0) / 100;
@@ -178,7 +183,8 @@ export function createEngine({
     if (!res.ok) {
       const body = await res.text?.().catch(() => '') || '';
       // Jupiter answers 400 when a token has no route (e.g. liquidity pulled); report it as such.
-      if (res.status === 400 && /route|not tradable|TOKEN_NOT_TRADABLE/i.test(body)) throw new Error('No Jupiter route for this token.');
+      // CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD means the sell would return next to nothing: the pool is drained.
+      if (res.status === 400 && /route|not tradable|TOKEN_NOT_TRADABLE|CANNOT_COMPUTE_OTHER_AMOUNT/i.test(body)) throw new Error(NO_ROUTE);
       throw new Error(`${new URL(url).host} responded ${res.status}${body ? `: ${body.slice(0, 120)}` : ''}`);
     }
     return res.json();
@@ -339,7 +345,7 @@ export function createEngine({
   async function jupiterQuote(inputMint, outputMint, amount, bot, { priority = true } = {}) {
     const url = `${JUPITER}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${bot.slippageBps}&restrictIntermediateTokens=true`;
     const quote = priority ? await jupiterTrade(url) : await getJson(url);
-    if (!quote?.outAmount || quote.outAmount === '0') throw new Error('No Jupiter route for this token.');
+    if (!quote?.outAmount || quote.outAmount === '0') throw new Error(NO_ROUTE);
     return quote;
   }
   function checkImpact(quote, bot) {
@@ -507,6 +513,7 @@ export function createEngine({
     position.sellFailures = (position.sellFailures || 0) + 1;
     position.firstSellFailureAt ||= now;
     position.nextSellAt = now + Math.min(60_000, 2_000 * 2 ** position.sellFailures);
+    position.sellError = error.message;
     log('error', `${bot.name}: sell of ${position.symbol} failed (attempt ${position.sellFailures}): ${error.message}`);
     if (position.sellFailures < 8 || now - position.firstSellFailureAt < 10 * 60_000) return;
     db.trades.push({
@@ -569,9 +576,11 @@ export function createEngine({
       const v = await sellValue(bot, position, { priority: Boolean(hint || timeUp) });
       quote = v.quote;
       markValue(position, v.valueSol, position.lastPrice, now);
+      position.sellError = null;
     } catch (e) {
       if (/budget/.test(e.message)) return; // background re-quote skipped; try again next tick
-      if (hint || timeUp) throw e;
+      // No route means the shown value is stale and the token may be worthless: count it as a failed sell.
+      if (hint || timeUp || e.message === NO_ROUTE) throw e;
       return;
     }
     const reason = exitReason(position, bot, position.multiple, now);

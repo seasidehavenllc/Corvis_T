@@ -101,7 +101,7 @@ function renderBots() {
         <div class="stat"><b>${b.openPositions}/${b.maxOpenPositions}</b><span>Open</span></div>
       </div>
       <div class="chips">
-        ${b.partialSellPercent > 0 ? `<span class="chip">bank ${esc(b.partialSellPercent)}% at ${gain(b.partialTakeProfitMultiplier)}</span>` : ''}<span class="chip">sell all at ${gain(b.takeProfitMultiplier)}</span><span class="chip">SL ${esc(b.stopLossPercent)}%</span>
+        ${b.partialSellPercent > 0 ? `<span class="chip">bank ${esc(b.partialSellPercent)}% at ${gain(b.partialTakeProfitMultiplier)}</span>` : ''}<span class="chip">sell all at ${gain(b.takeProfitMultiplier)}</span><span class="chip">${b.stopLossFollowsPrice ? 'trailing ' : ''}SL ${esc(b.stopLossPercent)}%</span>
         <span class="chip">${esc(b.maxPositionSol)} SOL/trade</span><span class="chip">liq ≥ $${Number(b.minLiquidityUsd).toLocaleString()}</span>
         <span class="chip">age ≤ ${esc(b.maxPairAgeMinutes)}m</span><span class="chip">hold ≤ ${esc(b.maxHoldMinutes)}m</span>
         ${b.trailingStopPercent ? `<span class="chip">trail ${esc(b.trailingStopPercent)}%</span>` : ''}
@@ -121,7 +121,7 @@ function positionRows(positions, withBot = true) {
   if (!positions.length) return '<p class="muted">No open positions.</p>';
   return `<table><thead><tr>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>Spent SOL</th><th title="What selling now would return, after fees">Worth SOL</th><th>P&amp;L</th><th>Held</th><th></th></tr></thead><tbody>${positions.map(p => {
     const m = p.multiple ?? 1;
-    return `<tr>${withBot ? `<td>${esc(p.botName || '')}</td>` : ''}<td>${p.pairUrl ? `<a href="${esc(p.pairUrl)}" target="_blank" rel="noopener">${esc(p.symbol)}</a>` : esc(p.symbol)} <span class="pill">${esc(p.mode)}</span>${p.partialDone ? ' <span class="pill pill-up">part banked</span>' : ''}${p.sellFailures ? ' <span class="pill pill-down">sell retrying</span>' : ''}</td><td>${sol(p.sizeSol)}</td><td>${sol(p.sizeSol * m)}</td><td>${signed((m - 1) * 100, 1)}%</td><td>${ago(p.openedAt)}</td><td><button class="btn btn-sm" data-close="${esc(p.id)}" data-bot="${esc(p.botId)}">Sell now</button></td></tr>`;
+    return `<tr>${withBot ? `<td>${esc(p.botName || '')}</td>` : ''}<td>${p.pairUrl ? `<a href="${esc(p.pairUrl)}" target="_blank" rel="noopener">${esc(p.symbol)}</a>` : esc(p.symbol)} <span class="pill">${esc(p.mode)}</span>${p.partialDone ? ' <span class="pill pill-up">part banked</span>' : ''}${p.sellError ? ` <span class="pill pill-down" title="${esc(p.sellError)}">no buyers · retrying</span>` : p.sellFailures ? ' <span class="pill pill-down">sell retrying</span>' : ''}</td><td>${sol(p.sizeSol)}</td>${p.sellError ? '<td class="muted">unknown</td><td class="down">can\'t sell</td>' : `<td>${sol(p.sizeSol * m)}</td><td>${signed((m - 1) * 100, 1)}%</td>`}<td>${ago(p.openedAt)}</td><td><button class="btn btn-sm" data-close="${esc(p.id)}" data-bot="${esc(p.botId)}">Sell now</button></td></tr>`;
   }).join('')}</tbody></table>`;
 }
 function tradeRows(trades, withBot = true) {
@@ -157,7 +157,7 @@ const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl:
 const GAIN_FIELDS = new Set(['fTp', 'fPartTp']);
 const gain = m => `+${+((m - 1) * 100).toFixed(1)}%`;
 const REASONS = { take_profit: 'take profit', stop_loss: 'stop loss', trailing_stop: 'trailing stop', max_hold: 'time limit', protect_profit: 'kept profit', unsellable: 'unsellable', manual: 'sold by you' };
-const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.5, stopLossPercent: 15, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 8000, maxPairAgeMinutes: 30, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.2, priorityFeeSol: 0.0003, maxPriceImpactPct: 8, maxRoundTripPct: 6, minHolders: 40, maxTopHoldersPct: 35, partialTakeProfitMultiplier: 1.3, partialSellPercent: 50, maxDevHoldingPct: 10, maxDevLaunches: 20, minOrganicScore: 0, minPairAgeMinutes: 0 };
+const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.5, stopLossPercent: 15, stopLossFollowsPrice: true, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 8000, maxPairAgeMinutes: 30, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.2, priorityFeeSol: 0.0003, maxPriceImpactPct: 8, maxRoundTripPct: 6, minHolders: 40, maxTopHoldersPct: 35, partialTakeProfitMultiplier: 1.3, partialSellPercent: 50, maxDevHoldingPct: 10, maxDevLaunches: 20, minOrganicScore: 0, minPairAgeMinutes: 0 };
 function requireUnlock() { if (adminToken) return true; $('#unlockDialog').showModal(); return false; }
 function openBotForm(bot) {
   if (!requireUnlock()) return;
@@ -168,6 +168,7 @@ function openBotForm(bot) {
     const v = (bot || defaults)[key] ?? defaults[key];
     $(`#${id}`).value = GAIN_FIELDS.has(id) ? +((v - 1) * 100).toFixed(2) : v;
   }
+  $('#fSlFollow').checked = (bot || defaults).stopLossFollowsPrice ?? defaults.stopLossFollowsPrice;
   feeHint();
   botError('');
   $('#botDialog').showModal();
@@ -205,7 +206,7 @@ $('#botForm').addEventListener('submit', async e => {
   e.preventDefault();
   botError('');
   if (!checkBotForm()) return;
-  const body = {};
+  const body = { stopLossFollowsPrice: $('#fSlFollow').checked };
   for (const [id, key] of Object.entries(fields)) {
     const v = $(`#${id}`).value;
     body[key] = id === 'fName' || id === 'fMode' ? v : GAIN_FIELDS.has(id) ? 1 + Number(v) / 100 : Number(v);

@@ -281,7 +281,8 @@ function validateBotSettings(body, current = {}) {
   if (!(strategy.maxHoldMinutes > 0 && strategy.maxHoldMinutes <= 10080)) return { error: 'Max hold time must be between 1 minute and 7 days.' };
   if (!(Number.isInteger(strategy.slippageBps) && strategy.slippageBps >= 10 && strategy.slippageBps <= 5000)) return { error: 'Slippage must be 10 to 5000 bps.' };
   if (!(strategy.maxDailyLossSol > 0)) return { error: 'Daily loss limit must be greater than 0.' };
-  return { name, takeProfitMultiplier, stopLossPercent, maxPositionSol, mode, ...strategy };
+  const stopLossFollowsPrice = Boolean(body?.stopLossFollowsPrice ?? current.stopLossFollowsPrice ?? STRATEGY_DEFAULTS.stopLossFollowsPrice);
+  return { name, takeProfitMultiplier, stopLossPercent, stopLossFollowsPrice, maxPositionSol, mode, ...strategy };
 }
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
@@ -359,7 +360,7 @@ app.post('/api/bots/:id/positions/:pid/close', requireAdmin, async (req, res) =>
   const position = db.positions.find(p => p.id === req.params.pid && p.botId === req.params.id);
   if (!bot || !position) return res.status(404).json({ error: 'Position not found.' });
   try { const trade = await engine.closePosition(bot, position, 'manual'); await saveDb(); res.json({ ok: true, trade }); }
-  catch (e) { res.status(502).json({ error: `Sell failed: ${e.message}` }); }
+  catch (e) { position.sellError = e.message; res.status(502).json({ error: `Sell failed: ${e.message}` }); }
 });
 // Pause the bot and sell every open position now.
 app.post('/api/bots/:id/sell-all', requireAdmin, async (req, res) => {

@@ -186,3 +186,31 @@ test('trade journal groups closed trades by entry signal', () => {
   assert.equal(dev.ranges[0].winRate, 1);
   assert.equal(dev.ranges[3].trades, 1);
 });
+
+test('a stop loss that follows the price sits below the peak, not the buy price', () => {
+  const pos = { entryPrice: 1, openedAt: new Date(now - 60_000).toISOString() };
+  const b = { ...bot, takeProfitMultiplier: 5, stopLossPercent: 15, trailingStopPercent: 0, stopLossFollowsPrice: true };
+  assert.equal(exitReason({ ...pos, peakMultiple: 1 }, b, 0.85, now), 'stop_loss');       // never rose: 15% below entry
+  assert.equal(exitReason({ ...pos, peakMultiple: 1.5 }, b, 1.3, now), null);             // 13% off a 1.5x peak
+  assert.equal(exitReason({ ...pos, peakMultiple: 1.5 }, b, 1.27, now), 'trailing_stop'); // 15% off the peak
+  assert.equal(exitReason({ ...pos, peakMultiple: 1.5 }, { ...b, stopLossFollowsPrice: false }, 1.27, now), null);
+});
+
+test('a token whose pool is drained is flagged as unsellable instead of showing a stale value', async () => {
+  let t = Date.now(), drained = false;
+  const fetchImpl = async url => {
+    if (drained && url.includes('/quote') && !url.includes(`inputMint=${SOL_MINT}`)) {
+      return { ok: false, status: 400, text: async () => '{"error":"Cannot compute other amount threshold, with amount 1 and slippageBps 500","errorCode":"CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD"}', json: async () => ({}) };
+    }
+    return { ok: true, json: async () => url.includes('/quote') ? { outAmount: url.includes(`inputMint=${SOL_MINT}`) ? '100000000' : '99000000' } : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }] : url.includes('token-boosts') ? [] : [pair({ pairCreatedAt: t - 60_000 })] };
+  };
+  const connection = { getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null } } } } }) };
+  const db = { bots: [{ ...bot, paperBalanceSol: 1, stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => t });
+  await engine.tick();
+  assert.equal(db.positions.length, 1);
+  drained = true; t += 20_000;
+  await engine.tick();
+  assert.match(db.positions[0].sellError, /no(body| Jupiter route)/i);
+  assert.equal(db.positions[0].sellFailures, 1);
+});
