@@ -280,3 +280,20 @@ test('default filters skip brand-new launches, thin pools and pools losing liqui
   assert.ok(passesFilters({ ...ok, liquidityChange5m: -25 }, d, now).includes('liquidity_falling'));
   assert.ok(passesFilters({ ...ok, holders: 60 }, d, now).includes('holders'));
 });
+test('the Jupiter token feed works with no open positions (SOL price is fetched on its own)', async () => {
+  const t = Date.now();
+  const urls = [];
+  const fetchImpl = async url => {
+    urls.push(url);
+    const body = url.includes('/price/v3') ? { [SOL_MINT]: { usdPrice: 150 } }
+      : url.includes('/tokens/v2/recent') ? [{ id: MINT, symbol: 'TEST', usdPrice: 0.15, liquidity: 20000, firstPool: { id: 'p', createdAt: new Date(t - 10 * 60_000).toISOString() } }]
+      : url.includes('/quote') ? { outAmount: '0' } : [];
+    return { ok: true, json: async () => body };
+  };
+  const connection = { getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null } } } } }) };
+  const db = { bots: [{ ...bot, paperBalanceSol: 1, stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => t });
+  await engine.scan();
+  assert.ok(urls.some(u => u.includes('/price/v3')));
+  assert.equal(engine.health.sources.jupiter, 'ok');
+});

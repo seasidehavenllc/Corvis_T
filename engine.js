@@ -251,7 +251,8 @@ export function createEngine({
   async function pricesFor(mints) {
     const out = new Map();
     try {
-      for (let i = 0; i < mints.length; i += 49) {
+      // Runs at least once, so a call with no mints still fetches the SOL price the token feeds need.
+      for (let i = 0; i === 0 || i < mints.length; i += 49) {
         const ids = [SOL_MINT, ...mints.slice(i, i + 49)];
         const data = await feedJson(`${JUPITER_PRICE}?ids=${ids.join(',')}`, 10_000);
         const sol = Number(data?.[SOL_MINT]?.usdPrice);
