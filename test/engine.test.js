@@ -36,9 +36,9 @@ test('exit rules: take profit, stop loss, max hold', () => {
 test('trailing stop arms after a rise and sells on pullback from the peak', () => {
   const b = { ...bot, takeProfitMultiplier: 3, trailingStopPercent: 10 };
   const pos = { entryPrice: 1, openedAt: new Date(now - 60_000).toISOString() };
-  assert.equal(exitReason({ ...pos, peakPrice: 1.05 }, b, 0.95, now), null); // not armed yet
-  assert.equal(exitReason({ ...pos, peakPrice: 1.5 }, b, 1.4, now), null);   // 6.7% off peak
-  assert.equal(exitReason({ ...pos, peakPrice: 1.5 }, b, 1.34, now), 'trailing_stop');
+  assert.equal(exitReason({ ...pos, peakMultiple: 1.05 }, b, 0.95, now), null); // not armed yet
+  assert.equal(exitReason({ ...pos, peakMultiple: 1.5 }, b, 1.4, now), null);   // 6.7% off peak
+  assert.equal(exitReason({ ...pos, peakMultiple: 1.5 }, b, 1.34, now), 'trailing_stop');
 });
 test('todayPnl only counts today', () => {
   const trades = [{ botId: 'b1', pnlSol: -0.1, closedAt: '2026-10-27T01:00:00Z' }, { botId: 'b1', pnlSol: -5, closedAt: '2026-10-26T01:00:00Z' }];
@@ -89,4 +89,50 @@ test('live bots never trade when live trading is not allowed', async () => {
   const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => { throw new Error('should not sign'); }, liveAllowed: false, fetchImpl });
   await engine.tick();
   assert.equal(db.positions.length, 0);
+});
+
+// Real paper runs showed "take profit" sells that lost money: the price feed said 2x while the pool
+// would only pay back 70%. Exits must follow what selling actually returns.
+test('exits follow the real sell quote, not a price feed that disagrees with it', async () => {
+  let feedPrice = '0.001', poolPrice = 0.001;
+  const quote = url => {
+    const u = new URL(url); const amt = Number(u.searchParams.get('amount'));
+    const out = u.searchParams.get('inputMint') === SOL_MINT ? amt / 1e9 / poolPrice * 1e6 : amt / 1e6 * poolPrice * 1e9;
+    return { outAmount: String(Math.floor(out)) };
+  };
+  const fetchImpl = async url => ({
+    ok: true,
+    json: async () => url.includes('/quote') ? quote(url) : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }]
+      : url.includes('token-boosts') ? [] : [pair({ priceNative: feedPrice, pairCreatedAt: Date.now() - 60_000 })]
+  });
+  const connection = { getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null } } } } }) };
+  const db = { bots: [{ ...bot, paperBalanceSol: 1, stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl });
+  await engine.tick();
+  assert.equal(db.positions.length, 1);
+  feedPrice = '0.002'; poolPrice = 0.0007;
+  await engine.tick();
+  assert.equal(db.trades.length, 1);
+  assert.equal(db.trades[0].reason, 'stop_loss');
+  assert.ok(db.trades[0].pnlSol < 0);
+});
+
+test('tokens that cannot be sold back are never bought', async () => {
+  const fetchImpl = async url => {
+    if (url.includes('/quote') && !url.includes(`inputMint=${SOL_MINT}`)) return { ok: false, status: 400, text: async () => '{"error":"No routes found"}', json: async () => ({}) };
+    return { ok: true, json: async () => url.includes('/quote') ? { outAmount: '100000000' } : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }] : url.includes('token-boosts') ? [] : [pair({ pairCreatedAt: Date.now() - 60_000 })] };
+  };
+  const connection = { getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null } } } } }) };
+  const db = { bots: [{ ...bot, paperBalanceSol: 1, stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl });
+  await engine.tick();
+  assert.equal(db.positions.length, 0);
+  assert.equal(db.bots[0].paperBalanceSol, 1);
+});
+
+test('an armed trailing stop never lets a winner turn into a loss', () => {
+  const b = { ...bot, takeProfitMultiplier: 3, trailingStopPercent: 20 };
+  const pos = { openedAt: new Date(now - 60_000).toISOString(), peakMultiple: 1.21 };
+  assert.equal(exitReason(pos, b, 1.05, now), null);
+  assert.equal(exitReason(pos, b, 0.99, now), 'trailing_stop');
 });
