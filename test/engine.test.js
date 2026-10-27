@@ -280,6 +280,14 @@ test('default filters skip brand-new launches, thin pools and pools losing liqui
   assert.ok(passesFilters({ ...ok, liquidityChange5m: -25 }, d, now).includes('liquidity_falling'));
   assert.ok(passesFilters({ ...ok, holders: 60 }, d, now).includes('holders'));
 });
+test('a big pool with few holders is skipped as creator-seeded', () => {
+  const d = { ...STRATEGY_DEFAULTS };
+  // Cmatdesk: $62k pool, 183 holders ($339 each) at 5 minutes old, then rugged -97%.
+  const seeded = pair({ pairCreatedAt: now - 6 * 60_000, liquidity: { usd: 62000 }, holders: 183, topHoldersPct: 4, devPct: 0 });
+  assert.ok(passesFilters(seeded, d, now).includes('seeded_pool'));
+  assert.ok(!passesFilters({ ...seeded, holders: 600 }, d, now).includes('seeded_pool'));
+  assert.ok(!passesFilters(seeded, { ...d, maxLiquidityPerHolderUsd: 0 }, now).includes('seeded_pool'));
+});
 test('the Jupiter token feed works with no open positions (SOL price is fetched on its own)', async () => {
   const t = Date.now();
   const urls = [];

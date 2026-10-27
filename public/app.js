@@ -127,6 +127,7 @@ function renderBots() {
 // Rug check result, shown as its own column so it can be read at a glance.
 function rugPosition(p) {
   if (p.rugWarning) return `<span class="pill pill-down" title="${esc(p.rugWarning)}">RUG · selling</span>`;
+  if (p.multiple != null && p.multiple <= 0.5) return '<span class="pill pill-down" title="Down half or more since the buy: treat as a rug">RUG</span>';
   if (p.holderWatch) {
     const top = Math.max(0, ...p.holderWatch.wallets.map(w => w.amount)) / p.holderWatch.supply * 100;
     return `<span class="pill pill-up" title="Watching ${p.holderWatch.wallets.length} big wallets every 1.5 s. Biggest holds ${top.toFixed(1)}%. None has dumped.">CLEAN</span>`;
@@ -136,6 +137,7 @@ function rugPosition(p) {
 function rugTrade(t) {
   if (t.reason === 'rug_warning') return '<span class="pill pill-down" title="Insiders started dumping; the bot sold early">RUG · sold early</span>';
   if (t.reason === 'unsellable') return '<span class="pill pill-down" title="Nobody could buy it back">RUG</span>';
+  if (t.entrySol > 0 && t.pnlSol / t.entrySol <= -0.5) return '<span class="pill pill-down" title="Lost half or more: the rug checks didn\'t catch it in time">RUG · missed</span>';
   const f = t.features || {};
   if (f.topWalletPct != null) return `<span class="pill pill-up" title="Biggest wallet held ${f.topWalletPct.toFixed(1)}% at entry${f.creatorPct != null ? `, creator ${f.creatorPct.toFixed(1)}%` : ''}; no insider dump while held">CLEAN</span>`;
   return '<span class="pill">not checked</span>';
@@ -176,12 +178,12 @@ function renderSide() {
 }
 
 // ---------- bot form ----------
-const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl: 'stopLossPercent', fHold: 'maxHoldMinutes', fMax: 'maxPositionSol', fOpen: 'maxOpenPositions', fLoss: 'maxDailyLossSol', fLiq: 'minLiquidityUsd', fAge: 'maxPairAgeMinutes', fBuys: 'minBuys5m', fSlip: 'slippageBps', fTrail: 'trailingStopPercent', fRatio: 'minBuySellRatio', fPrio: 'priorityFeeSol', fImpact: 'maxPriceImpactPct', fRound: 'maxRoundTripPct', fHolders: 'minHolders', fTop: 'maxTopHoldersPct', fPartTp: 'partialTakeProfitMultiplier', fPartPct: 'partialSellPercent', fDev: 'maxDevHoldingPct', fDevMints: 'maxDevLaunches', fOrganic: 'minOrganicScore', fMinAge: 'minPairAgeMinutes', fWhale: 'maxSingleHolderPct', fInsider: 'insiderSellPct' };
+const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl: 'stopLossPercent', fHold: 'maxHoldMinutes', fMax: 'maxPositionSol', fOpen: 'maxOpenPositions', fLoss: 'maxDailyLossSol', fLiq: 'minLiquidityUsd', fAge: 'maxPairAgeMinutes', fBuys: 'minBuys5m', fSlip: 'slippageBps', fTrail: 'trailingStopPercent', fRatio: 'minBuySellRatio', fPrio: 'priorityFeeSol', fImpact: 'maxPriceImpactPct', fRound: 'maxRoundTripPct', fHolders: 'minHolders', fTop: 'maxTopHoldersPct', fPartTp: 'partialTakeProfitMultiplier', fPartPct: 'partialSellPercent', fDev: 'maxDevHoldingPct', fDevMints: 'maxDevLaunches', fOrganic: 'minOrganicScore', fMinAge: 'minPairAgeMinutes', fWhale: 'maxSingleHolderPct', fInsider: 'insiderSellPct', fLiqHolder: 'maxLiquidityPerHolderUsd' };
 // Profit targets are entered as a % gain (50 = +50%) and stored as a multiple (1.5×).
 const GAIN_FIELDS = new Set(['fTp', 'fPartTp']);
 const gain = m => `+${+((m - 1) * 100).toFixed(1)}%`;
 const REASONS = { take_profit: 'take profit', stop_loss: 'stop loss', trailing_stop: 'trailing stop', max_hold: 'time limit', protect_profit: 'kept profit', unsellable: 'unsellable', manual: 'sold by you', rug_warning: 'rug warning' };
-const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.5, stopLossPercent: 12, stopLossFollowsPrice: true, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 15000, maxPairAgeMinutes: 60, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.5, priorityFeeSol: 0.0003, maxPriceImpactPct: 8, maxRoundTripPct: 4, minHolders: 100, maxTopHoldersPct: 30, partialTakeProfitMultiplier: 1.15, partialSellPercent: 50, maxDevHoldingPct: 5, maxDevLaunches: 10, minOrganicScore: 0, minPairAgeMinutes: 5, maxSingleHolderPct: 10, insiderSellPct: 2 };
+const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.5, stopLossPercent: 12, stopLossFollowsPrice: true, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 15000, maxPairAgeMinutes: 60, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.5, priorityFeeSol: 0.0003, maxPriceImpactPct: 8, maxRoundTripPct: 4, minHolders: 100, maxTopHoldersPct: 30, partialTakeProfitMultiplier: 1.15, partialSellPercent: 50, maxDevHoldingPct: 5, maxDevLaunches: 10, minOrganicScore: 0, minPairAgeMinutes: 5, maxSingleHolderPct: 10, insiderSellPct: 2, maxLiquidityPerHolderUsd: 150 };
 function requireUnlock() { if (adminToken) return true; $('#unlockDialog').showModal(); return false; }
 function openBotForm(bot) {
   if (!requireUnlock()) return;
