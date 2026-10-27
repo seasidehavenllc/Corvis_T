@@ -470,3 +470,52 @@ test('a wallet\'s record counts finished trades, and old coins it never sold as 
   assert.equal(r.wins, 1);
   assert.ok(Math.abs(r.pnlSol - (0.5 - 0.7 - 0.5)) < 1e-9);
 });
+
+import { profitableTraders, worthCopying } from '../engine.js';
+const geckoTrade = (wallet, kind, usd) => ({ attributes: { tx_from_address: wallet, kind, volume_in_usd: String(usd) } });
+test('traders who sold a coin for 1.5x or more are picked out of its pool trades', () => {
+  const good = wallet(), meh = wallet(), dumper = wallet();
+  const r = profitableTraders([geckoTrade(good, 'buy', 100), geckoTrade(good, 'sell', 400), geckoTrade(meh, 'buy', 100), geckoTrade(meh, 'sell', 120), geckoTrade(dumper, 'sell', 5000)]);
+  assert.deepEqual(r.map(x => x.wallet), [good]);
+});
+test('only wallets with a real, profitable, human-paced record are worth copying', () => {
+  const ok = { closed: 12, winRate: 0.5, pnlSol: 3, swapsPerHour: 4 };
+  assert.equal(worthCopying(ok), true);
+  assert.equal(worthCopying({ ...ok, closed: 3 }), false);
+  assert.equal(worthCopying({ ...ok, winRate: 0.3 }), false);
+  assert.equal(worthCopying({ ...ok, pnlSol: -1 }), false);
+  assert.equal(worthCopying({ ...ok, swapsPerHour: 200 }), false);
+});
+
+test('auto-find: a coin that runs 3x leads to its profitable traders, and good ones are kept to copy', async () => {
+  const trader = wallet();
+  // The trader's history: 10 coins bought for 1 SOL and sold for 1.5 SOL, an hour apart.
+  const txs = [];
+  for (let i = 0; i < 10; i++) {
+    const mint = Keypair.generate().publicKey.toBase58();
+    const at = now / 1000 - (20 - i * 2) * 3600;
+    const mk = (pre, post, solPre, solPost, t) => ({ blockTime: t, transaction: { message: { accountKeys: [{ pubkey: trader }] } },
+      meta: { err: null, preBalances: [solPre * 1e9], postBalances: [solPost * 1e9], preTokenBalances: [tokenBal(trader, mint, pre)], postTokenBalances: [tokenBal(trader, mint, post)] } });
+    txs.push(mk(0, 100, 10, 9, at), mk(100, 0, 9, 10.5, at + 600));
+  }
+  const conn = {
+    getSignaturesForAddress: async () => txs.map((_, i) => ({ signature: `s${i}`, err: null })),
+    getParsedTransaction: async sig => txs[Number(sig.slice(1))]
+  };
+  let price = 0.001, t = now;
+  const fetchImpl = async url => ({ ok: true, json: async () =>
+    url.includes('/tokens/') && url.includes('/pools') ? { data: [{ attributes: { address: 'Pool1111111111111111111111111111111111111111' } }] }
+    : url.includes('/trades') ? { data: [geckoTrade(trader, 'buy', 50), geckoTrade(trader, 'sell', 300)] }
+    : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }] : url.includes('token-boosts') ? []
+    : url.includes('/quote') ? { outAmount: '0' } : [pair({ priceNative: String(price), liquidity: { usd: 50000 } })] });
+  const db = { bots: [{ ...STRATEGY_DEFAULTS, id: 'a1', name: 'Auto', enabled: true, autoFollow: true, followOnly: true, paperBalanceSol: 1, stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection: conn, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => t });
+  await engine.scan(); // first sight at 0.001
+  price = 0.0035; t += 60_000;
+  await engine.scan(); // now 3.5x
+  t += 3 * 60_000;
+  await engine.scout();
+  assert.equal(db.smartWallets.length, 1);
+  assert.equal(db.smartWallets[0].address, trader);
+  assert.equal(db.smartWallets[0].closed, 10);
+});

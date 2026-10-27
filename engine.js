@@ -42,6 +42,33 @@ export const MAX_FOLLOWED = 10;
 // Coins a followed wallet buys are usually minutes old and still small, so the filters that only judge
 // how established a coin is are left out for them. Mint authority, whale, rug and cost checks still apply.
 const FOLLOW_IGNORES = new Set(['age', 'too_new', 'buys', 'momentum', 'holders', 'organic', 'seeded_pool']);
+// Finding wallets to copy: a coin that has run this far since the bot first saw it is checked for the
+// wallets that bought early and sold for a profit; those wallets are then graded on their whole recent record.
+const SCOUT_MULTIPLE = 3;
+const SCOUT_MS = 2 * 60_000; // one winning coin looked at this often
+const GRADE_MS = 45_000; // one wallet graded this often
+const REGRADE_MS = 6 * 3_600_000;
+export const MAX_SMART_WALLETS = 10;
+// Good enough to copy: a real sample of finished trades, more wins than a coin flip on memecoins, net profit,
+// and not a high-frequency bot (those are front-runners and arbitrage, which can't be copied with a delay).
+export function worthCopying(r) {
+  return (r.read == null || r.read >= r.of * 0.8) && r.closed >= 8 && r.winRate >= 0.4 && r.pnlSol > 0 && r.swapsPerHour <= 30;
+}
+// From a pool's recent trades (GeckoTerminal), the wallets that bought and then sold for at least 1.5x.
+export function profitableTraders(trades) {
+  const by = new Map();
+  for (const t of trades) {
+    const a = t?.attributes || {};
+    const w = a.tx_from_address;
+    if (!w) continue;
+    const r = by.get(w) || { wallet: w, bought: 0, sold: 0, n: 0 };
+    if (a.kind === 'buy') r.bought += Number(a.volume_in_usd) || 0; else r.sold += Number(a.volume_in_usd) || 0;
+    r.n += 1;
+    by.set(w, r);
+  }
+  return [...by.values()].filter(r => r.bought >= 20 && r.sold >= r.bought * 1.5 && r.n <= 10)
+    .sort((a, b) => (b.sold - b.bought) - (a.sold - a.bought));
+}
 const QUOTE_MINTS = new Set([SOL_MINT, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']);
 
 export const STRATEGY_DEFAULTS = {
@@ -73,6 +100,7 @@ export const STRATEGY_DEFAULTS = {
   insiderSellPct: 2,
   followWallets: [],
   followOnly: false,
+  autoFollow: false,
   priorityFeeSol: 0.0003,
   maxDailyLossSol: 0.2,
   paperBalanceSol: 1
@@ -157,18 +185,20 @@ export function walletRecord(txs, wallet) {
     const at = (tx.blockTime || 0) * 1000;
     const c = coins.get(mint) || { spent: 0, got: 0, buys: 0, sells: 0, firstBuy: null, lastSell: null };
     if (side === 'buy') { c.buys += 1; c.spent += Math.max(0, -sol); c.firstBuy = Math.min(c.firstBuy ?? at, at); }
-    else { c.sells += 1; c.got += Math.max(0, sol); c.lastSell = Math.max(c.lastSell ?? at, at); }
+    // Tokens leaving with no SOL coming back were sent to another wallet, not sold: that coin can't be judged.
+    else if (sol < 0.001) c.sentAway = true;
+    else { c.sells += 1; c.got += sol; c.lastSell = Math.max(c.lastSell ?? at, at); }
     coins.set(mint, c);
     swaps += 1; first = Math.min(first, at); last = Math.max(last, at);
   }
   // Coins bought over an hour before its latest trade and never sold are usually dead: they count as losses,
   // so a wallet can't look good by simply never selling its losers.
-  const closed = [...coins.values()].filter(c => c.spent > 0 && c.buys && (c.sells || c.firstBuy < last - 3_600_000));
+  const closed = [...coins.values()].filter(c => c.spent > 0 && c.buys && !c.sentAway && (c.sells || c.firstBuy < last - 3_600_000));
   const wins = closed.filter(c => c.got > c.spent).length;
   const holds = closed.filter(c => c.firstBuy && c.lastSell).map(c => (c.lastSell - c.firstBuy) / 60_000).sort((a, b) => a - b);
   const hours = Math.max((last - first) / 3_600_000, 1 / 60);
   return {
-    swaps, closed: closed.length, unsold: closed.filter(c => !c.sells).length, wins, winRate: closed.length ? wins / closed.length : null,
+    swaps, sentAway: [...coins.values()].filter(c => c.sentAway).length, closed: closed.length, unsold: closed.filter(c => !c.sells).length, wins, winRate: closed.length ? wins / closed.length : null,
     pnlSol: closed.reduce((t, c) => t + c.got - c.spent, 0), spentSol: closed.reduce((t, c) => t + c.spent, 0),
     medianHoldMin: holds.length ? holds[Math.floor(holds.length / 2)] : null,
     swapsPerHour: swaps ? swaps / hours : 0, coversHours: swaps ? (last - first) / 3_600_000 : 0
@@ -876,10 +906,13 @@ export function createEngine({
   const leaders = new Map(); // wallet -> newest signature seen
   const signals = new Map(); // mint -> { wallet, at } of the latest followed buy
   let lastFollowAt = 0, following = false;
+  // A bot copies the wallets pasted into it, plus the ones the bot found itself when auto-follow is on.
+  const followedBy = bot => [...(bot.followWallets || []), ...(bot.autoFollow ? (db.smartWallets || []).map(w => w.address) : [])];
   async function watchLeaders(now) {
-    if (now - lastFollowAt < FOLLOW_MS) return;
+    // Each wallet costs an RPC call per round, so many wallets are read less often.
+    if (now - lastFollowAt < Math.max(FOLLOW_MS, leaders.size * 500)) return;
     lastFollowAt = now;
-    const wallets = new Set(db.bots.filter(b => b.enabled).flatMap(b => b.followWallets || []));
+    const wallets = new Set(db.bots.filter(b => b.enabled).flatMap(followedBy));
     for (const p of db.positions) if (p.leader) wallets.add(p.leader);
     for (const w of leaders.keys()) if (!wallets.has(w)) leaders.delete(w);
     for (const [m, sig] of signals) if (now - sig.at > FOLLOW_TTL_MS) signals.delete(m);
@@ -904,6 +937,69 @@ export function createEngine({
           }
         }
       }
+    }
+  }
+
+  // A wallet's record from its last 100 transactions, read two at a time and retried when the RPC is busy
+  // (the public one answers 429 quickly). `read` of `of` says how much of the history was actually seen.
+  async function gradeWallet(address) {
+    const owner = new PublicKey(address);
+    const sigs = (await marketConnection.getSignaturesForAddress(owner, { limit: 100 }, 'confirmed')).filter(x => !x.err);
+    const fetchTx = async sig => {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try { return await marketConnection.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }); }
+        catch (e) { if (attempt === 3 || !/429|Too many|rate/i.test(e.message)) return null; await sleep(1_000 * 2 ** attempt); }
+      }
+      return null;
+    };
+    const txs = [];
+    for (let i = 0; i < sigs.length; i += 2) txs.push(...await Promise.all(sigs.slice(i, i + 2).map(x => fetchTx(x.signature))));
+    const read = txs.filter(Boolean);
+    return { address: owner.toBase58(), read: read.length, of: sigs.length, ...walletRecord(read, owner.toBase58()) };
+  }
+
+  // Auto-follow: find wallets worth copying without anyone pasting them in. Coins that ran 3x since the bot
+  // first saw them are looked up on GeckoTerminal for wallets that bought and sold at a profit; each such wallet
+  // is then graded on its last 100 transactions, and the best that pass are kept in db.smartWallets.
+  // Kept wallets are re-graded every 6 hours and dropped once they stop passing.
+  const firstSeen = new Map(); // mint -> { price, at }
+  const scouted = new Set();
+  const gradeQueue = [];
+  const gradedAt = new Map(); // wallet -> last graded
+  let lastCandidates = new Map(), lastScoutAt = 0, lastGradeAt = 0, scouting = false;
+  async function scout(now) {
+    if (!db.bots.some(b => b.enabled && b.autoFollow)) return;
+    db.smartWallets ||= [];
+    if (now - lastScoutAt >= SCOUT_MS) {
+      lastScoutAt = now;
+      const winner = [...lastCandidates].find(([m, p]) => !scouted.has(m) && firstSeen.get(m)?.price > 0 &&
+        Number(p.priceNative) / firstSeen.get(m).price >= SCOUT_MULTIPLE && (p.liquidity?.usd || 0) >= 10_000);
+      if (winner) {
+        const [mint, pair] = winner;
+        scouted.add(mint);
+        const pools = await feedJson(`${GECKOTERMINAL}/networks/solana/tokens/${mint}/pools?page=1`, 90_000);
+        const pool = pools?.data?.[0]?.attributes?.address;
+        const trades = pool ? (await feedJson(`${GECKOTERMINAL}/networks/solana/pools/${pool}/trades`, 90_000))?.data || [] : [];
+        const found = profitableTraders(trades).slice(0, 5).map(r => r.wallet).filter(w => !gradeQueue.includes(w) && now - (gradedAt.get(w) || 0) >= REGRADE_MS);
+        gradeQueue.push(...found);
+        log('info', `Wallet scout: ${pair.baseToken?.symbol} (${mint}) ran ${(Number(pair.priceNative) / firstSeen.get(mint).price).toFixed(1)}x; ${found.length} profitable traders queued for grading.`);
+      }
+    }
+    if (now - lastGradeAt >= GRADE_MS) {
+      for (const w of db.smartWallets) if (now - (gradedAt.get(w.address) || 0) >= REGRADE_MS && !gradeQueue.includes(w.address)) gradeQueue.push(w.address);
+      const next = gradeQueue.shift();
+      if (!next) return;
+      lastGradeAt = now;
+      gradedAt.set(next, now);
+      const record = await gradeWallet(next);
+      // Half-read history (RPC busy) proves nothing either way: try that wallet again later.
+      if (record.read < record.of * 0.8) { gradedAt.delete(next); gradeQueue.push(next); return; }
+      const keep = worthCopying(record);
+      db.smartWallets = db.smartWallets.filter(w => w.address !== next);
+      if (keep) db.smartWallets.push({ ...record, gradedAt: iso() });
+      db.smartWallets.sort((a, b) => b.pnlSol - a.pnlSol).splice(MAX_SMART_WALLETS);
+      log('info', `Wallet check ${next}: ${keep ? 'copying' : 'skipped'}. ${JSON.stringify(record)}`);
+      await save();
     }
   }
 
@@ -945,6 +1041,7 @@ export function createEngine({
         if (db.trades.length !== tradeCount || now - lastSaveAt >= 2_000) { lastSaveAt = now; await save(); }
       }
       // Followed wallets are read in the background so a slow RPC never delays a sell.
+      if (!scouting) { scouting = true; scout(now).catch(e => { health.lastError = `Wallet scout: ${e.message}`; }).finally(() => { scouting = false; }); }
       if (!following) { following = true; watchLeaders(now).catch(e => { health.lastError = `Copy trading: ${e.message}`; }).finally(() => { following = false; }); }
       for (const bot of db.bots.filter(b => b.enabled)) {
         if (todayPnl(db.trades, bot.id, now) <= -bot.maxDailyLossSol) {
@@ -978,6 +1075,9 @@ export function createEngine({
       if (!hungry.length) return;
       const candidates = await discover(now);
       health.candidates = candidates.size;
+      for (const [m, p] of candidates) if (!firstSeen.has(m) && Number(p.priceNative) > 0) firstSeen.set(m, { price: Number(p.priceNative), at: now });
+      for (const [m, f] of firstSeen) if (now - f.at > 2 * 3_600_000) firstSeen.delete(m);
+      lastCandidates = candidates;
       // Coins a followed wallet just bought may not be in any feed yet: look them up directly.
       const copied = [...signals.keys()].filter(m => !candidates.has(m));
       if (copied.length && solUsd) {
@@ -989,7 +1089,7 @@ export function createEngine({
       let bought = false;
       for (const bot of hungry) {
         // Coins a wallet this bot follows just bought come first; a follow-only bot buys nothing else.
-        const follows = new Set(bot.followWallets || []);
+        const follows = new Set(followedBy(bot));
         const leaderOf = mint => { const sig = signals.get(mint); return sig && follows.has(sig.wallet) ? sig.wallet : null; };
         const mine = ordered.filter(([m]) => leaderOf(m));
         for (const [mint, pair] of bot.followOnly ? mine : [...mine, ...ordered.filter(([m]) => !leaderOf(m))]) {
@@ -1079,7 +1179,7 @@ export function createEngine({
       tick();
     },
     stop() { timers.splice(0).forEach(clearInterval); },
-    tick, monitor, scan, watchLeaders: () => watchLeaders(clock()), health, liveAllowed, jupiterSwap, estimateMultiple,
+    tick, monitor, scan, watchLeaders: () => watchLeaders(clock()), scout: () => scout(clock()), gradeWallet, health, liveAllowed, jupiterSwap, estimateMultiple,
     adoptHoldings: (bot, mints) => withWallet(bot, () => adoptHoldings(bot, mints)),
     closePosition: (bot, position, reason) => withWallet(bot, () => db.positions.includes(position) ? closePosition(bot, position, reason) : null)
   };

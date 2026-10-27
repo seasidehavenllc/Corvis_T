@@ -75,7 +75,7 @@ function render() {
   $('#kOpen').textContent = o.positions.length;
   $('#kEngine').textContent = o.engine?.lastTickAt ? `engine scanned ${ago(o.engine.lastTickAt)} ago · ${o.engine.candidates} candidates` : 'engine starting…';
 
-  renderBots(); renderPositions(); renderTrades(); renderSide(); renderJournal();
+  renderBots(); renderPositions(); renderTrades(); renderSide(); renderJournal(); renderSmartWallets();
 }
 
 function renderBots() {
@@ -109,7 +109,7 @@ function renderBots() {
         ${b.partialSellPercent > 0 ? `<span class="chip">bank ${esc(b.partialSellPercent)}% at ${gain(b.partialTakeProfitMultiplier)}</span>` : ''}<span class="chip">sell all at ${gain(b.takeProfitMultiplier)}</span><span class="chip">${b.stopLossFollowsPrice ? 'trailing ' : ''}SL ${esc(b.stopLossPercent)}%</span>
         <span class="chip">${esc(b.maxPositionSol)} SOL/trade</span><span class="chip">liq ≥ $${Number(b.minLiquidityUsd).toLocaleString()}</span>
         <span class="chip">age ≤ ${esc(b.maxPairAgeMinutes)}m</span><span class="chip">hold ≤ ${esc(b.maxHoldMinutes)}m</span>
-        ${b.followWallets?.length ? `<span class="chip">copying ${b.followWallets.length} wallet${b.followWallets.length > 1 ? 's' : ''}${b.followOnly ? ' only' : ''}</span>` : ''}
+        ${b.followWallets?.length || b.autoFollow ? `<span class="chip">copying ${b.followWallets?.length ? `${b.followWallets.length} wallet${b.followWallets.length > 1 ? 's' : ''}` : ''}${b.followWallets?.length && b.autoFollow ? ' + ' : ''}${b.autoFollow ? 'auto-found wallets' : ''}${b.followOnly ? ' only' : ''}</span>` : ''}
         ${b.trailingStopPercent ? `<span class="chip">trail ${esc(b.trailingStopPercent)}%</span>` : ''}
         ${b.insiderSellPct > 0 || b.maxSingleHolderPct > 0 ? `<span class="chip">rug guard${b.maxSingleHolderPct > 0 ? ` · 1 wallet ≤ ${esc(b.maxSingleHolderPct)}%` : ''}${b.insiderSellPct > 0 ? ` · sell if insiders dump ${esc(b.insiderSellPct)}%` : ''}</span>` : '<span class="chip">rug guard off</span>'}
       </div>
@@ -156,6 +156,13 @@ function tradeRows(trades, withBot = true) {
   return `<table><thead><tr><th>Closed</th>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>Rug check</th><th>In SOL</th><th>Out SOL</th><th>P&amp;L</th><th>Exit</th><th></th></tr></thead><tbody>${trades.map(t => `<tr><td>${ago(t.closedAt)} ago</td>${withBot ? `<td>${esc(t.botName || '')}</td>` : ''}<td>${esc(t.symbol)} <span class="pill">${esc(t.mode)}</span>${t.features?.copied ? ' <span class="pill">copy</span>' : ''}</td><td>${rugTrade(t)}</td><td>${sol(t.entrySol)}</td><td>${sol(t.exitSol)}</td><td>${signed(t.pnlSol)}</td><td>${esc(REASONS[t.reason] || String(t.reason).replace('_', ' '))}${t.partialSol ? ' <span class="muted small">(part banked)</span>' : ''}</td><td>${explorer(t.sellSignature)}</td></tr>`).join('')}</tbody></table>`;
 }
 // Which entry signals have actually paid off, from this server's own closed trades.
+// Wallets the bot found and graded itself; bots with auto-find on copy these.
+function renderSmartWallets() {
+  const ws = state.overview?.smartWallets || [];
+  const on = (state.overview?.bots || []).some(b => b.autoFollow);
+  $('#smartWallets').innerHTML = ws.length ? `<table><thead><tr><th>Wallet</th><th>Win rate</th><th>P&amp;L SOL</th></tr></thead><tbody>${ws.map(w => `<tr><td class="mono" title="${esc(w.address)}">${esc(short(w.address))}</td><td>${pct(w.winRate)} <span class="muted">of ${w.closed}</span></td><td>${signed(w.pnlSol, 2)}</td></tr>`).join('')}</tbody></table>`
+    : `<p class="muted small">${on ? 'Searching: when a coin runs 3x, the bot grades the wallets that sold it for a profit and lists the good ones here.' : 'Turn on "Auto-find wallets" in a bot to let it find traders to copy.'}</p>`;
+}
 function renderJournal() {
   const j = state.journal;
   if (!j || j.trades < 5) { $('#journal').innerHTML = `<p class="muted small">Shows which signals win once there are 5+ closed trades (${j?.trades || 0} so far).</p>`; return; }
@@ -198,6 +205,7 @@ function openBotForm(bot) {
   $('#fSlFollow').checked = (bot || defaults).stopLossFollowsPrice ?? defaults.stopLossFollowsPrice;
   $('#fFollow').value = (bot?.followWallets || []).join('\n');
   $('#fFollowOnly').checked = Boolean(bot?.followOnly);
+  $('#fAutoFollow').checked = Boolean(bot?.autoFollow);
   $('#followReport').innerHTML = '';
   feeHint();
   botError('');
@@ -211,6 +219,8 @@ function feeHint() {
 }
 // Grade each pasted wallet from its last 100 transactions before trusting it with copy trades.
 function walletVerdict(r) {
+  if (r.read != null && r.read < r.of * 0.8) return ['', `only read ${r.read} of ${r.of} trades (Solana connection busy): try again`];
+  if (r.sentAway >= 3 && r.closed < 8) return ['down', 'sends coins to other wallets instead of selling: skip'];
   if (r.swapsPerHour > 30) return ['down', 'trades like a bot: skip'];
   if (r.closed < 8) return ['', 'too few finished trades to judge'];
   if (r.pnlSol > 0 && r.winRate >= 0.4) return ['up', 'looks good'];
@@ -257,7 +267,7 @@ $('#botForm').addEventListener('submit', async e => {
   e.preventDefault();
   botError('');
   if (!checkBotForm()) return;
-  const body = { stopLossFollowsPrice: $('#fSlFollow').checked, followWallets: $('#fFollow').value.split(/[\s,]+/).filter(Boolean), followOnly: $('#fFollowOnly').checked };
+  const body = { stopLossFollowsPrice: $('#fSlFollow').checked, followWallets: $('#fFollow').value.split(/[\s,]+/).filter(Boolean), followOnly: $('#fFollowOnly').checked, autoFollow: $('#fAutoFollow').checked };
   for (const [id, key] of Object.entries(fields)) {
     const v = $(`#${id}`).value;
     body[key] = id === 'fName' || id === 'fMode' ? v : GAIN_FIELDS.has(id) ? 1 + Number(v) / 100 : Number(v);
