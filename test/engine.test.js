@@ -251,3 +251,21 @@ test('pump.fun coins are priced from their bonding curve on chain, so a dump is 
   assert.equal(db.trades.length, 1);
   assert.equal(db.trades[0].reason, 'stop_loss');
 });
+test('coins left in a wallet after a restart are taken back and sold by the exit rules', async () => {
+  let t = Date.now(), out = '20000000';
+  const fetchImpl = async url => ({ ok: true, json: async () => url.includes('/quote') ? { outAmount: out } : url.includes('/tokens/') ? [pair()] : [] });
+  const { Keypair } = await import('@solana/web3.js');
+  const owner = Keypair.generate();
+  const connection = {
+    getParsedTokenAccountsByOwner: async () => ({ value: [{ pubkey: owner.publicKey, account: { owner: owner.publicKey, lamports: 2039280, data: { parsed: { info: { tokenAmount: { amount: '5000000', uiAmount: 5 } } } } } }] })
+  };
+  const b = { ...bot, enabled: false, stopLossPercent: 12, stats: { ...bot.stats } };
+  const db = { bots: [b], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => owner, liveAllowed: true, fetchImpl, clock: () => t });
+  const adopted = await engine.adoptHoldings(b, [MINT]);
+  assert.equal(adopted.length, 1);
+  assert.equal(db.positions[0].mode, 'live');
+  assert.equal(db.positions[0].tokenRaw, '5000000');
+  assert.ok(Math.abs(db.positions[0].sizeSol - 0.02) < 0.001); // valued at what it sells for now
+  assert.equal((await engine.adoptHoldings(b, [MINT])).length, 0); // never adopted twice
+});

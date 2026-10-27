@@ -141,6 +141,11 @@ async function recoverWallets() {
       db.bots.push(bot);
       recovery.recovered++;
       log('warn', `Recovered ${bot.name} (${w.lamports / LAMPORTS_PER_SOL} SOL, ${w.tokens} token account(s)). Its trade history was not saved.`);
+      // Coins bought before the restart go back under the bot's exit rules so they still get sold.
+      if (w.tokens && LIVE_TRADING_ENABLED) {
+        const adopted = await engine.adoptHoldings(bot, await heldMints(botKeypair(bot).publicKey)).catch(e => { log('error', `${bot.name}: could not take back its coins: ${e.message}`); return []; });
+        if (adopted.length) bot.status = `Paused · recovered, managing ${adopted.length} coin(s)`;
+      }
     }
     // SEED_PAPER_BOT=true starts a paper bot on an empty install, useful for watching the engine on real markets.
     if (process.env.SEED_PAPER_BOT === 'true' && !db.bots.length) {
@@ -216,6 +221,14 @@ async function solBalances(addresses) {
     chunk.forEach((a, j) => result.set(a, (infos[j]?.lamports || 0) / LAMPORTS_PER_SOL));
   }
   return result;
+}
+async function heldMints(owner) {
+  const mints = new Set();
+  for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+    const response = await connection.getParsedTokenAccountsByOwner(owner, { programId }, 'confirmed');
+    for (const item of response.value) if (BigInt(item.account.data.parsed?.info?.tokenAmount?.amount || '0') > 0n) mints.add(item.account.data.parsed.info.mint);
+  }
+  return [...mints];
 }
 async function heldTokenAccounts(owner) {
   let count = 0;
@@ -564,6 +577,11 @@ const engine = createEngine({
 await loadDb();
 engine.start();
 recoverWallets();
+// Render's free plan puts a service to sleep after 15 minutes without outside requests, and waking it
+// up starts from an empty disk. Requesting our own public address every 5 minutes keeps it awake.
+if (process.env.RENDER_EXTERNAL_URL && process.env.KEEP_AWAKE !== 'false') {
+  setInterval(() => fetch(`${process.env.RENDER_EXTERNAL_URL}/api/status`).catch(() => {}), 5 * 60_000).unref();
+}
 if (process.env.SELFTEST_ON_BOOT === 'true') setTimeout(() => selfTest().catch(e => console.log(`SELFTEST crashed: ${e.message}`)), 3000);
 if (!/^[a-f0-9]{64}$/i.test(ENCRYPTION_KEY)) log('warn', 'WALLET_ENCRYPTION_KEY is missing or invalid; bot wallets cannot be created.');
 if (!ADMIN_TOKEN) log('warn', 'ADMIN_API_TOKEN is not set; all wallet-changing actions are locked.');

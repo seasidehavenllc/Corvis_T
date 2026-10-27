@@ -778,6 +778,41 @@ export function createEngine({
     }
   }
 
+  // After a restart wipes the database, coins still sitting in a bot wallet have no position, so nothing
+  // would ever sell them. Take each one back under management, valued at what selling it now would return,
+  // so the stop loss, trailing stop and max hold apply from here on. Coins with no sell route are skipped.
+  async function adoptHoldings(bot, mints) {
+    const owner = getKeypair(bot);
+    const fresh = mints.filter(m => !db.positions.some(p => p.botId === bot.id && p.mint === m));
+    const pairs = fresh.length ? await dexPairs(fresh).catch(() => new Map()) : new Map();
+    const adopted = [];
+    for (const mint of fresh) {
+      try {
+        const holdings = await tokenHoldings(owner.publicKey, mint);
+        const raw = holdings.reduce((s, a) => s + a.raw, 0n);
+        if (raw <= 0n) continue;
+        const pair = pairs.get(mint);
+        const price = Number(pair?.priceNative) || 0;
+        const position = {
+          id: randomUUID(), botId: bot.id, mode: 'live', mint, symbol: pair?.baseToken?.symbol || '?',
+          pairUrl: pair?.url || null, entryPrice: price, lastPrice: price, openedAt: iso(), recovered: true,
+          tokenRaw: raw.toString(), tokens: holdings.reduce((s, a) => s + a.ui, 0), rentSol: rentOf(holdings)
+        };
+        const { valueSol } = await sellValue(bot, position, { priority: false });
+        if (!(valueSol > 0)) continue;
+        position.sizeSol = valueSol;
+        markValue(position, valueSol, price, clock());
+        db.positions.push(position);
+        adopted.push(position);
+        log('warn', `${bot.name}: picked ${position.symbol} back up after a restart (worth ${valueSol.toFixed(4)} SOL now). Its exit rules apply from here.`);
+      } catch (e) {
+        log('warn', `${bot.name}: could not take back ${mint.slice(0, 6)}… after a restart: ${e.message}`);
+      }
+    }
+    if (adopted.length) await save();
+    return adopted;
+  }
+
   async function tick() { await monitor(); await scan(); }
 
   return {
@@ -788,6 +823,7 @@ export function createEngine({
     },
     stop() { timers.splice(0).forEach(clearInterval); },
     tick, monitor, scan, health, liveAllowed, jupiterSwap, estimateMultiple,
+    adoptHoldings: (bot, mints) => withWallet(bot, () => adoptHoldings(bot, mints)),
     closePosition: (bot, position, reason) => withWallet(bot, () => db.positions.includes(position) ? closePosition(bot, position, reason) : null)
   };
 }
