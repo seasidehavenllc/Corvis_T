@@ -21,6 +21,7 @@ const AUDIT_KEYS = ['holders', 'topHoldersPct', 'devPct', 'devMints', 'isSus', '
 const SEEN_TTL_MS = 30 * 60 * 1000;
 const WATCHLIST_MAX = 120;
 const REVALUE_MS = 15_000; // re-quote each open position at least this often
+const MAX_ACCOUNT_RENT_SOL = 0.0025; // a token account deposit (Token-2022 accounts are a little bigger)
 const GRADUATION_PCT = 80; // skip launchpad tokens this far along their bonding curve
 const REVALUE_MIN_MS = 2_000; // ...and up to this often when few positions share the Jupiter budget
 // Tokens named after major coins are almost always copycat rugs.
@@ -398,8 +399,23 @@ export function createEngine({
       })
     });
     const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
+    if (buying && connection.simulateTransaction) await checkBuyCost(owner, tx, Number(amount), bot);
     tx.sign([owner]);
     return { signature: await sendAndConfirm(tx, lastValidBlockHeight), quote };
+  }
+  // Dry-run the buy first. A swap that would fail (slippage, missing accounts) is skipped without paying
+  // its fee, and so is one that would take more SOL than the trade, one token account deposit and the
+  // priority fee: some routes open extra accounts or charge launchpad fees that are never paid back.
+  async function checkBuyCost(owner, tx, lamports, bot) {
+    const address = owner.publicKey.toBase58();
+    const before = await connection.getBalance(owner.publicKey, 'processed');
+    const sim = await connection.simulateTransaction(tx, { sigVerify: false, commitment: 'processed', accounts: { encoding: 'base64', addresses: [address] } });
+    if (sim.value?.err) throw new Error(`the buy would fail on-chain: ${JSON.stringify(sim.value.err)}`);
+    const after = sim.value?.accounts?.[0]?.lamports;
+    if (after == null) return;
+    const extra = (before - after - lamports) / LAMPORTS_PER_SOL;
+    const allowed = MAX_ACCOUNT_RENT_SOL + (bot.priorityFeeSol || 0) + 0.0001;
+    if (extra > allowed) throw new Error(`the buy would cost ${extra.toFixed(4)} SOL on top of the trade (extra accounts or launchpad fees)`);
   }
   async function tokenHoldings(owner, mint) {
     const res = await connection.getParsedTokenAccountsByOwner(owner, { mint: new PublicKey(mint) }, 'confirmed');
@@ -737,7 +753,8 @@ export function createEngine({
           try { if (await withWallet(bot, () => openPosition(bot, pair))) bought = true; }
           catch (e) {
             rejected.set(mint, now + (/ 429|budget/.test(e.message) ? 30_000 : 5 * 60_000));
-            const key = /round trip|selling back/.test(e.message) ? 'round_trip' : /impact/.test(e.message) ? 'price_impact' : /route/.test(e.message) ? 'no_route' : 'error';
+            const key = /round trip|selling back/.test(e.message) ? 'round_trip' : /impact/.test(e.message) ? 'price_impact' : /route/.test(e.message) ? 'no_route'
+              : /on top of the trade/.test(e.message) ? 'hidden_cost' : /would fail/.test(e.message) ? 'would_fail' : / 429/.test(e.message) ? 'rate_limited' : 'error';
             skips[key] = (skips[key] || 0) + 1;
             if (key === 'error') log('error', `${bot.name}: buy of ${pair.baseToken?.symbol} failed: ${e.message}`);
           }
