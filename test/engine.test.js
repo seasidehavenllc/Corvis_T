@@ -47,9 +47,14 @@ test('todayPnl only counts today', () => {
 
 test('paper engine buys a safe candidate and sells at take profit', async () => {
   let price = '0.001';
+  const quote = url => {
+    const u = new URL(url); const amt = Number(u.searchParams.get('amount'));
+    const out = u.searchParams.get('inputMint') === SOL_MINT ? amt / 1e9 / Number(price) * 1e6 : amt / 1e6 * Number(price) * 1e9;
+    return { outAmount: String(Math.floor(out)) };
+  };
   const fetchImpl = async url => ({
     ok: true,
-    json: async () => url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }]
+    json: async () => url.includes('/quote') ? quote(url) : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }]
       : url.includes('token-boosts') ? []
       : [pair({ priceNative: price, pairCreatedAt: Date.now() - 60_000 })]
   });
@@ -58,7 +63,7 @@ test('paper engine buys a safe candidate and sells at take profit', async () => 
   const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl });
   await engine.tick();
   assert.equal(db.positions.length, 1);
-  assert.ok(Math.abs(db.bots[0].paperBalanceSol - 0.9) < 1e-9);
+  assert.ok(Math.abs(db.bots[0].paperBalanceSol - (0.9 - 0.000005 - STRATEGY_DEFAULTS.priorityFeeSol)) < 1e-9, 'paper pays the position plus network and priority fees');
   price = '0.002';
   await engine.tick();
   assert.equal(db.positions.length, 0);

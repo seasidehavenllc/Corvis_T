@@ -18,6 +18,13 @@ A token is bought only if it passes the bot's filters: minimum USD liquidity, ma
 - **System check** in the dashboard (or `SELFTEST_ON_BOOT=true`, which logs `SELFTEST` lines) hits the real feeds, Jupiter and the RPC. It builds a real swap transaction and simulates it on mainnet without spending anything.
 - **Test live swap** in a bot's *Stats & wallet* panel appears when live trading is on. It does a real 0.01 SOL → USDC → SOL round trip with the bot's wallet and reports the timings and cost.
 
+## Speed and rate limits (read before going live)
+Free market-data APIs rate-limit shared hosting like Render. Testing on Render showed HTTP 429s from DexScreener, GeckoTerminal, Jupiter's free tier and the public Solana RPC. The engine copes: each feed cools down after a 429 and the others carry on, and Jupiter calls run on a budget that always keeps 40% for real quotes and swaps. For fast, reliable live trading, add two free keys:
+- **`JUPITER_API_KEY`** from portal.jup.ag. It switches to `api.jup.ag` with higher limits and tightens the loops to 1 s for positions and 3 s for scans.
+- **A private RPC** for `SOLANA_RPC_URL` (and `MARKET_RPC_URL`), for example Helius's free plan. The public RPC rate-limits quickly.
+
+This is a fast polling sniper: it typically buys within seconds to a minute of a pool appearing in the feeds. It does not compete for the first block of a launch, which needs paid streaming (Yellowstone gRPC) and Jito bundles.
+
 ## Keeping your money safe
 - **Wallets can't be lost:** every bot wallet is derived from `WALLET_ENCRYPTION_KEY` plus a wallet number. If the database is wiped (Render's free plan does this whenever it sleeps or redeploys), the server checks the blockchain on startup and re-adds every bot wallet that still holds SOL or tokens, as "Recovered wallet #N". Back up `WALLET_ENCRYPTION_KEY`: it is the master key for all bot wallets.
 - **History:** trade history and bot settings live in `DATA_DIR`. On the free plan they reset when the instance sleeps, so use **Download backup** in the dashboard and **Restore** after a restart. A paid plan with a disk at `DATA_DIR` keeps them automatically.

@@ -5,9 +5,15 @@ import { randomUUID } from 'node:crypto';
 export const SOL_MINT = 'So11111111111111111111111111111111111111112';
 export const DEXSCREENER = 'https://api.dexscreener.com';
 export const GECKOTERMINAL = 'https://api.geckoterminal.com/api/v2';
-export const JUPITER = process.env.JUPITER_API_URL || 'https://lite-api.jup.ag/swap/v1';
-export const JUPITER_PRICE = process.env.JUPITER_PRICE_URL || 'https://lite-api.jup.ag/price/v3';
-export const JUPITER_TOKENS = process.env.JUPITER_TOKENS_URL || 'https://lite-api.jup.ag/tokens/v2';
+// A free key from portal.jup.ag (JUPITER_API_KEY) moves requests to api.jup.ag with much higher limits.
+const JUP_KEY = process.env.JUPITER_API_KEY || '';
+const JUP_BASE = JUP_KEY ? 'https://api.jup.ag' : 'https://lite-api.jup.ag';
+export const JUPITER = process.env.JUPITER_API_URL || `${JUP_BASE}/swap/v1`;
+export const JUPITER_PRICE = process.env.JUPITER_PRICE_URL || `${JUP_BASE}/price/v3`;
+export const JUPITER_TOKENS = process.env.JUPITER_TOKENS_URL || `${JUP_BASE}/tokens/v2`;
+export const JUPITER_HEADERS = JUP_KEY ? { 'x-api-key': JUP_KEY } : {};
+export const JUPITER_RPM = Number(process.env.JUPITER_RPM || (JUP_KEY ? 500 : 50));
+const TX_FEE_SOL = 0.000005;
 const SEEN_TTL_MS = 30 * 60 * 1000;
 const WATCHLIST_MAX = 120;
 
@@ -75,11 +81,12 @@ export function todayPnl(trades, botId, now = Date.now()) {
 
 export function createEngine({
   db, save, log, connection, marketConnection = connection, getKeypair, liveAllowed,
-  fetchImpl = fetch, monitorMs = 2_000, scanMs = 6_000, paperCostPct = 1,
+  fetchImpl = fetch, monitorMs = 2_000, scanMs = 6_000, jupiterRpm = JUPITER_RPM,
   clock = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms))
 }) {
   const watch = new Map(); // mint -> first seen time
   const safety = new Map(); // mint -> boolean
+  const decimals = new Map(); // mint -> token decimals
   const timers = [];
   let monitoring = false;
   let scanning = false;
@@ -93,8 +100,25 @@ export function createEngine({
     return run;
   }
 
-  async function getJson(url, init) {
-    const res = await fetchImpl(url, { ...init, headers: { accept: 'application/json', ...(init?.headers || {}) } });
+  // Jupiter request budget (token bucket). Background calls (prices, feeds) may only use 60% of it,
+  // so quotes and swaps for real trades always have room.
+  const JUP_HOST = new URL(JUPITER).host;
+  const bucket = { tokens: jupiterRpm, at: clock() };
+  async function takeJupiter(priority) {
+    for (let waited = 0; ; waited += 250) {
+      const t = clock();
+      bucket.tokens = Math.min(jupiterRpm, bucket.tokens + (t - bucket.at) * jupiterRpm / 60_000);
+      bucket.at = t;
+      if (bucket.tokens >= 1 + (priority ? 0 : jupiterRpm * 0.4)) { bucket.tokens -= 1; return; }
+      if (!priority) throw new Error('Jupiter budget kept for trades');
+      if (waited > 10_000) throw new Error('Jupiter request budget exhausted');
+      await sleep(250);
+    }
+  }
+  async function getJson(url, init, { priority = false } = {}) {
+    const jup = new URL(url).host === JUP_HOST;
+    if (jup) await takeJupiter(priority);
+    const res = await fetchImpl(url, { ...init, headers: { accept: 'application/json', ...(jup ? JUPITER_HEADERS : {}), ...(init?.headers || {}) } });
     if (!res.ok) throw new Error(`${new URL(url).host} responded ${res.status}`);
     return res.json();
   }
@@ -204,6 +228,7 @@ export function createEngine({
     }
     for (const [m, pair] of await dexPairs(stale)) pairs.set(m, pair);
     health.sources = sources;
+    health.jupiterBudget = `${Math.floor(bucket.tokens)}/${jupiterRpm} per min`;
     if (!Object.values(sources).includes('ok')) health.lastError = `No market feed answered: ${JSON.stringify(sources)}`;
     return pairs;
   }
@@ -213,6 +238,7 @@ export function createEngine({
     const info = await marketConnection.getParsedAccountInfo(new PublicKey(mint), 'confirmed');
     const parsed = info.value?.data?.parsed?.info;
     const ok = Boolean(parsed) && parsed.mintAuthority == null && parsed.freezeAuthority == null;
+    if (parsed) decimals.set(mint, parsed.decimals);
     safety.set(mint, ok);
     return ok;
   }
@@ -232,10 +258,21 @@ export function createEngine({
       await sleep(400);
     }
   }
+  // Quotes and swaps are trade-critical: they jump the budget queue and retry briefly on a 429.
+  async function jupiterTrade(url, init) {
+    for (let attempt = 0; ; attempt++) {
+      try { return await getJson(url, init, { priority: true }); }
+      catch (e) { if (!/ 429/.test(e.message) || attempt >= 3) throw e; await sleep(500 * 2 ** attempt); }
+    }
+  }
+  async function jupiterQuote(inputMint, outputMint, amount, bot) {
+    const quote = await jupiterTrade(`${JUPITER}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${bot.slippageBps}&restrictIntermediateTokens=true`);
+    if (!quote?.outAmount || quote.outAmount === '0') throw new Error('No Jupiter route for this token.');
+    return quote;
+  }
   async function jupiterSwap(owner, inputMint, outputMint, amount, bot) {
-    const quote = await getJson(`${JUPITER}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${bot.slippageBps}&restrictIntermediateTokens=true`);
-    if (!quote?.outAmount) throw new Error('No Jupiter route for this token.');
-    const { swapTransaction, lastValidBlockHeight } = await getJson(`${JUPITER}/swap`, {
+    const quote = await jupiterQuote(inputMint, outputMint, amount, bot);
+    const { swapTransaction, lastValidBlockHeight } = await jupiterTrade(`${JUPITER}/swap`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         quoteResponse: quote, userPublicKey: owner.publicKey.toBase58(), wrapAndUnwrapSol: true,
@@ -288,9 +325,16 @@ export function createEngine({
       if (held > 0) position.entryPrice = position.peakPrice = position.lastPrice = position.sizeSol / held;
       position.buySignature = signature;
     } else {
-      if (bot.paperBalanceSol < bot.maxPositionSol) return null;
-      position.tokens = bot.maxPositionSol * (1 - paperCostPct / 100) / price;
-      bot.paperBalanceSol -= bot.maxPositionSol;
+      // Paper fills use a real Jupiter quote (route, price impact) plus network and priority fees,
+      // so paper results match what the same trade would have done live.
+      const fee = TX_FEE_SOL + (bot.priorityFeeSol || 0);
+      if (bot.paperBalanceSol < bot.maxPositionSol + fee) return null;
+      const quote = await jupiterQuote(SOL_MINT, position.mint, Math.floor(bot.maxPositionSol * LAMPORTS_PER_SOL), bot);
+      position.tokenRaw = quote.outAmount;
+      position.tokens = Number(quote.outAmount) / 10 ** (decimals.get(position.mint) ?? 6);
+      position.sizeSol = bot.maxPositionSol + fee;
+      position.entryPrice = position.peakPrice = position.lastPrice = position.sizeSol / position.tokens;
+      bot.paperBalanceSol -= position.sizeSol;
     }
     db.positions.push(position);
     log('info', `${bot.name} bought ${position.symbol} for ${position.sizeSol.toFixed(4)} SOL (${bot.mode}).`);
@@ -308,8 +352,12 @@ export function createEngine({
       await reclaimRent(owner, await tokenHoldings(owner.publicKey, position.mint)).catch(e => log('warn', `${bot.name}: could not close empty ${position.symbol} account: ${e.message}`));
       const after = await connection.getBalance(owner.publicKey, 'confirmed');
       exitSol = (after - before) / LAMPORTS_PER_SOL;
+    } else if (position.tokenRaw) {
+      const quote = await jupiterQuote(position.mint, SOL_MINT, position.tokenRaw, bot);
+      exitSol = Number(quote.outAmount) / LAMPORTS_PER_SOL - TX_FEE_SOL - (bot.priorityFeeSol || 0);
+      bot.paperBalanceSol += exitSol;
     } else {
-      exitSol = position.tokens * price * (1 - paperCostPct / 100);
+      exitSol = position.tokens * price * 0.99; // paper positions opened before quote-based fills
       bot.paperBalanceSol += exitSol;
     }
     const pnlSol = exitSol - position.sizeSol;

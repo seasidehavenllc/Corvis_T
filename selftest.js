@@ -1,6 +1,6 @@
 // Checks every external dependency the bots need, against the real network, without spending SOL.
 import { PublicKey, VersionedTransaction, LAMPORTS_PER_SOL } from '@solana/web3.js';
-import { SOL_MINT, DEXSCREENER, GECKOTERMINAL, JUPITER, JUPITER_PRICE, JUPITER_TOKENS } from './engine.js';
+import { SOL_MINT, DEXSCREENER, GECKOTERMINAL, JUPITER, JUPITER_PRICE, JUPITER_TOKENS, JUPITER_HEADERS } from './engine.js';
 
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
@@ -13,7 +13,8 @@ export async function runSelfTest({ fetchImpl = fetch, connection, marketConnect
     catch (e) { steps.push({ name, ok: false, ms: Date.now() - t0, detail: e.message }); }
   }
   async function getJson(url, init) {
-    const res = await fetchImpl(url, { ...init, headers: { accept: 'application/json', ...(init?.headers || {}) } });
+    const jup = new URL(url).host === new URL(JUPITER).host;
+    const res = await fetchImpl(url, { ...init, headers: { accept: 'application/json', ...(jup ? JUPITER_HEADERS : {}), ...(init?.headers || {}) } });
     const text = await res.text();
     if (!res.ok) throw new Error(`${new URL(url).host} responded ${res.status}: ${text.slice(0, 160)}`);
     return JSON.parse(text);
