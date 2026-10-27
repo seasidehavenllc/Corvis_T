@@ -31,8 +31,9 @@ A token is bought only if it passes the bot's filters: minimum USD liquidity, ma
 - **Test live swap** in a bot's *Stats & wallet* panel appears when live trading is on. It does a real 0.01 SOL → USDC → SOL round trip with the bot's wallet and reports the timings and cost.
 
 ## Speed and rate limits (read before going live)
-Free market-data APIs rate-limit shared hosting like Render. Testing on Render showed HTTP 429s from DexScreener, GeckoTerminal, Jupiter's free tier and the public Solana RPC. The engine copes: each feed cools down after a 429 and the others carry on, and Jupiter calls run on a budget that always keeps 40% for real quotes and swaps. For fast, reliable live trading, add two free keys:
+Free market-data APIs rate-limit shared hosting like Render. Testing on Render showed HTTP 429s from DexScreener, GeckoTerminal, Jupiter's free tier and the public Solana RPC. The engine copes: each feed cools down after a 429 and the others carry on, and Jupiter calls run on a budget that always keeps 40% for real quotes and swaps. For fast, reliable live trading, add these free keys:
 - **`JUPITER_API_KEY`** from portal.jup.ag. It switches to `api.jup.ag`. The free key allows about 60 requests a minute; on a paid plan set `JUPITER_RPM` to its limit so the bots can quote more often.
+- **`COINGECKO_API_KEY`**, a free demo key from coingecko.com/en/api. It moves the GeckoTerminal new-pools feed to CoinGecko's on-chain API with its own 30-a-minute limit, so it stops being rate-limited by other apps sharing Render's outbound IP.
 - **A private RPC** for `SOLANA_RPC_URL` (and `MARKET_RPC_URL`), for example Helius's free plan. The public RPC rate-limits quickly.
 
 This is a fast polling sniper: it typically buys within seconds to a minute of a pool appearing in the feeds. It does not compete for the first block of a launch, which needs paid streaming (Yellowstone gRPC) and Jito bundles.
