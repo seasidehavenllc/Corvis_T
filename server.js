@@ -595,7 +595,7 @@ app.get('/api/wallets/:address/record', requireAdmin, async (req, res) => {
   if (cached && Date.now() - cached.at < 10 * 60_000) return res.json(cached.record);
   try {
     const record = await engine.gradeWallet(address);
-    walletRecords.set(address, { at: Date.now(), record });
+    if (record.read >= record.of * 0.8) walletRecords.set(address, { at: Date.now(), record });
     log('info', `Wallet check ${address}: ${JSON.stringify(record)}`);
     res.json(record);
   } catch (e) { res.status(502).json({ error: `Unable to read this wallet: ${e.message}` }); }

@@ -52,7 +52,7 @@ export const MAX_SMART_WALLETS = 10;
 // Good enough to copy: a real sample of finished trades, more wins than a coin flip on memecoins, net profit,
 // and not a high-frequency bot (those are front-runners and arbitrage, which can't be copied with a delay).
 export function worthCopying(r) {
-  return r.closed >= 8 && r.winRate >= 0.4 && r.pnlSol > 0 && r.swapsPerHour <= 30;
+  return (r.read == null || r.read >= r.of * 0.8) && r.closed >= 8 && r.winRate >= 0.4 && r.pnlSol > 0 && r.swapsPerHour <= 30;
 }
 // From a pool's recent trades (GeckoTerminal), the wallets that bought and then sold for at least 1.5x.
 export function profitableTraders(trades) {
@@ -185,18 +185,20 @@ export function walletRecord(txs, wallet) {
     const at = (tx.blockTime || 0) * 1000;
     const c = coins.get(mint) || { spent: 0, got: 0, buys: 0, sells: 0, firstBuy: null, lastSell: null };
     if (side === 'buy') { c.buys += 1; c.spent += Math.max(0, -sol); c.firstBuy = Math.min(c.firstBuy ?? at, at); }
-    else { c.sells += 1; c.got += Math.max(0, sol); c.lastSell = Math.max(c.lastSell ?? at, at); }
+    // Tokens leaving with no SOL coming back were sent to another wallet, not sold: that coin can't be judged.
+    else if (sol < 0.001) c.sentAway = true;
+    else { c.sells += 1; c.got += sol; c.lastSell = Math.max(c.lastSell ?? at, at); }
     coins.set(mint, c);
     swaps += 1; first = Math.min(first, at); last = Math.max(last, at);
   }
   // Coins bought over an hour before its latest trade and never sold are usually dead: they count as losses,
   // so a wallet can't look good by simply never selling its losers.
-  const closed = [...coins.values()].filter(c => c.spent > 0 && c.buys && (c.sells || c.firstBuy < last - 3_600_000));
+  const closed = [...coins.values()].filter(c => c.spent > 0 && c.buys && !c.sentAway && (c.sells || c.firstBuy < last - 3_600_000));
   const wins = closed.filter(c => c.got > c.spent).length;
   const holds = closed.filter(c => c.firstBuy && c.lastSell).map(c => (c.lastSell - c.firstBuy) / 60_000).sort((a, b) => a - b);
   const hours = Math.max((last - first) / 3_600_000, 1 / 60);
   return {
-    swaps, closed: closed.length, unsold: closed.filter(c => !c.sells).length, wins, winRate: closed.length ? wins / closed.length : null,
+    swaps, sentAway: [...coins.values()].filter(c => c.sentAway).length, closed: closed.length, unsold: closed.filter(c => !c.sells).length, wins, winRate: closed.length ? wins / closed.length : null,
     pnlSol: closed.reduce((t, c) => t + c.got - c.spent, 0), spentSol: closed.reduce((t, c) => t + c.spent, 0),
     medianHoldMin: holds.length ? holds[Math.floor(holds.length / 2)] : null,
     swapsPerHour: swaps ? swaps / hours : 0, coversHours: swaps ? (last - first) / 3_600_000 : 0
@@ -938,15 +940,22 @@ export function createEngine({
     }
   }
 
-  // A wallet's record from its last 100 transactions, read a few at a time so the RPC isn't flooded.
+  // A wallet's record from its last 100 transactions, read two at a time and retried when the RPC is busy
+  // (the public one answers 429 quickly). `read` of `of` says how much of the history was actually seen.
   async function gradeWallet(address) {
     const owner = new PublicKey(address);
     const sigs = (await marketConnection.getSignaturesForAddress(owner, { limit: 100 }, 'confirmed')).filter(x => !x.err);
+    const fetchTx = async sig => {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try { return await marketConnection.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }); }
+        catch (e) { if (attempt === 3 || !/429|Too many|rate/i.test(e.message)) return null; await sleep(1_000 * 2 ** attempt); }
+      }
+      return null;
+    };
     const txs = [];
-    for (let i = 0; i < sigs.length; i += 4) {
-      txs.push(...await Promise.all(sigs.slice(i, i + 4).map(x => marketConnection.getParsedTransaction(x.signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }).catch(() => null))));
-    }
-    return { address: owner.toBase58(), ...walletRecord(txs.filter(Boolean), owner.toBase58()) };
+    for (let i = 0; i < sigs.length; i += 2) txs.push(...await Promise.all(sigs.slice(i, i + 2).map(x => fetchTx(x.signature))));
+    const read = txs.filter(Boolean);
+    return { address: owner.toBase58(), read: read.length, of: sigs.length, ...walletRecord(read, owner.toBase58()) };
   }
 
   // Auto-follow: find wallets worth copying without anyone pasting them in. Coins that ran 3x since the bot
@@ -983,6 +992,8 @@ export function createEngine({
       lastGradeAt = now;
       gradedAt.set(next, now);
       const record = await gradeWallet(next);
+      // Half-read history (RPC busy) proves nothing either way: try that wallet again later.
+      if (record.read < record.of * 0.8) { gradedAt.delete(next); gradeQueue.push(next); return; }
       const keep = worthCopying(record);
       db.smartWallets = db.smartWallets.filter(w => w.address !== next);
       if (keep) db.smartWallets.push({ ...record, gradedAt: iso() });
