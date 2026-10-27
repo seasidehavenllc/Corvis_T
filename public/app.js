@@ -23,6 +23,8 @@ function ago(iso) { const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000)
 function explorer(sig) { return sig ? `<a href="https://explorer.solana.com/tx/${esc(sig)}?cluster=${esc(state.config?.network || 'devnet')}" target="_blank" rel="noopener">tx</a>` : ''; }
 function toast(message, isError = false) {
   const el = $('#toast'); el.textContent = message; el.className = `toast${isError ? ' error' : ''}`;
+  // An open modal dialog covers everything outside it, so show the toast inside the dialog.
+  (document.querySelector('dialog[open]') || document.body).appendChild(el);
   clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.add('hidden'), 4500);
 }
 function spark(series, height = 40) {
@@ -167,6 +169,7 @@ function openBotForm(bot) {
     $(`#${id}`).value = GAIN_FIELDS.has(id) ? +((v - 1) * 100).toFixed(2) : v;
   }
   feeHint();
+  botError('');
   $('#botDialog').showModal();
 }
 // Network + priority fees on the buy and the sell, as a share of the position size.
@@ -178,9 +181,30 @@ function feeHint() {
 $('#fMax').addEventListener('input', feeHint);
 $('#fPrio').addEventListener('input', feeHint);
 $('#newBot').addEventListener('click', () => openBotForm(null));
+$('#botClose').addEventListener('click', () => $('#botDialog').close());
+// Errors are shown inside the dialog: a toast would sit behind the open dialog where it can't be seen.
+function botError(msg, field) {
+  $('#botError').textContent = msg || '';
+  $('#botError').classList.toggle('hidden', !msg);
+  if (field) { field.focus(); field.scrollIntoView({ block: 'center' }); }
+}
+function checkBotForm() {
+  for (const el of $('#botForm').querySelectorAll('input')) {
+    const label = el.closest('label')?.firstChild?.textContent.trim() || el.id;
+    if (el.required && el.value.trim() === '') return botError(`${label}: enter a value.`, el), false;
+    if (el.type !== 'number') continue;
+    const v = Number(el.value);
+    if (!Number.isFinite(v)) return botError(`${label}: enter a number.`, el), false;
+    if (el.min !== '' && v < Number(el.min)) return botError(`${label}: must be at least ${el.min}.`, el), false;
+    if (el.max !== '' && v > Number(el.max)) return botError(`${label}: must be at most ${el.max}.`, el), false;
+  }
+  return true;
+}
 $('#botForm').addEventListener('submit', async e => {
   if (e.submitter?.value !== 'save') return;
   e.preventDefault();
+  botError('');
+  if (!checkBotForm()) return;
   const body = {};
   for (const [id, key] of Object.entries(fields)) {
     const v = $(`#${id}`).value;
@@ -190,7 +214,7 @@ $('#botForm').addEventListener('submit', async e => {
     if (editingBotId) await api(`/api/bots/${encodeURIComponent(editingBotId)}`, { method: 'PATCH', body: JSON.stringify(body) });
     else { const bot = await post('/api/bots', body); toast(`Created ${bot.name}. Wallet ${short(bot.walletAddress)}`); }
     $('#botDialog').close(); refresh();
-  } catch (err) { toast(err.message, true); }
+  } catch (err) { botError(err.message); }
 });
 
 // ---------- bot actions ----------

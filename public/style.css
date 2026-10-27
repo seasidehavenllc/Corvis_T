@@ -108,3 +108,8 @@ dialog::backdrop { background: rgba(0,0,0,.6); }
 .mode-switch button.on { background: #2f6feb; color: #fff; }
 .mode-switch button.on.live { background: #d9534f; }
 .mode-switch button:disabled { opacity: .4; cursor: not-allowed; }
+
+.dialog-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; position: sticky; top: -20px; margin-top: -20px; padding: 20px 0 8px; background: var(--panel); z-index: 1; }
+.dialog-head .form-error { flex-basis: 100%; }
+.btn-x { font-size: 18px; line-height: 1; padding: 4px 10px; }
+.form-error { color: #ff6b6b; background: rgba(255, 107, 107, .1); border: 1px solid rgba(255, 107, 107, .4); border-radius: 8px; padding: 8px 10px; margin: 0; }
