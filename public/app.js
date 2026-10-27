@@ -158,7 +158,7 @@ const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl:
 const GAIN_FIELDS = new Set(['fTp', 'fPartTp']);
 const gain = m => `+${+((m - 1) * 100).toFixed(1)}%`;
 const REASONS = { take_profit: 'take profit', stop_loss: 'stop loss', trailing_stop: 'trailing stop', max_hold: 'time limit', protect_profit: 'kept profit', unsellable: 'unsellable', manual: 'sold by you' };
-const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.5, stopLossPercent: 12, stopLossFollowsPrice: true, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 8000, maxPairAgeMinutes: 30, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.5, priorityFeeSol: 0.0003, maxPriceImpactPct: 8, maxRoundTripPct: 4, minHolders: 40, maxTopHoldersPct: 35, partialTakeProfitMultiplier: 1.15, partialSellPercent: 50, maxDevHoldingPct: 10, maxDevLaunches: 20, minOrganicScore: 0, minPairAgeMinutes: 0 };
+const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.5, stopLossPercent: 12, stopLossFollowsPrice: true, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 15000, maxPairAgeMinutes: 60, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.5, priorityFeeSol: 0.0003, maxPriceImpactPct: 8, maxRoundTripPct: 4, minHolders: 100, maxTopHoldersPct: 30, partialTakeProfitMultiplier: 1.15, partialSellPercent: 50, maxDevHoldingPct: 5, maxDevLaunches: 10, minOrganicScore: 0, minPairAgeMinutes: 5 };
 function requireUnlock() { if (adminToken) return true; $('#unlockDialog').showModal(); return false; }
 function openBotForm(bot) {
   if (!requireUnlock()) return;

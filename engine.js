@@ -17,7 +17,7 @@ export const JUPITER_RPM = Number(process.env.JUPITER_RPM || (JUP_KEY ? 60 : 50)
 const TX_FEE_SOL = 0.000005;
 const LOCKED_FLOOR = 1.02; // whole-trade multiple kept once the first target is banked
 const NO_ROUTE = 'No Jupiter route for this token: nobody can buy it right now (its pool is drained or moving). The bot keeps retrying.';
-const AUDIT_KEYS = ['holders', 'topHoldersPct', 'devPct', 'devMints', 'isSus', 'organicScore', 'traders5m', 'organicBuyers5m', 'bondingCurvePct'];
+const AUDIT_KEYS = ['holders', 'topHoldersPct', 'devPct', 'devMints', 'isSus', 'organicScore', 'traders5m', 'organicBuyers5m', 'bondingCurvePct', 'liquidityChange5m'];
 const SEEN_TTL_MS = 30 * 60 * 1000;
 const WATCHLIST_MAX = 120;
 const REVALUE_MS = 15_000; // re-quote each open position at least this often
@@ -26,6 +26,7 @@ const GRADUATION_PCT = 80; // skip launchpad tokens this far along their bonding
 const REVALUE_MIN_MS = 2_000; // ...and up to this often when few positions share the Jupiter budget
 // Tokens named after major coins are almost always copycat rugs.
 const IMPOSTOR_SYMBOLS = new Set(['SOL', 'WSOL', 'USDC', 'USDT', 'BTC', 'WBTC', 'ETH', 'WETH', 'JUP', 'BONK', 'WIF', 'TRUMP', 'PYTH', 'RAY', 'JTO']);
+const LIQUIDITY_DROP_PCT = 10; // a pool that lost this much liquidity in 5 minutes is skipped
 const PRICE_MS = 3_000; // spot price refresh for open positions
 const DEX_PRICE_MS = 1_000; // DexScreener price refresh for open positions
 // pump.fun bonding curves are read straight from the chain every tick, the fastest price there is.
@@ -37,8 +38,8 @@ export const STRATEGY_DEFAULTS = {
   stopLossPercent: 12,
   stopLossFollowsPrice: true,
   maxPositionSol: 0.05,
-  minLiquidityUsd: 8000,
-  maxPairAgeMinutes: 30,
+  minLiquidityUsd: 15000,
+  maxPairAgeMinutes: 60,
   minBuys5m: 10,
   minBuySellRatio: 1.5,
   maxOpenPositions: 3,
@@ -47,12 +48,12 @@ export const STRATEGY_DEFAULTS = {
   slippageBps: 500,
   maxPriceImpactPct: 8,
   maxRoundTripPct: 4,
-  minHolders: 40,
-  maxTopHoldersPct: 35,
-  maxDevHoldingPct: 10,
-  maxDevLaunches: 20,
+  minHolders: 100,
+  maxTopHoldersPct: 30,
+  maxDevHoldingPct: 5,
+  maxDevLaunches: 10,
   minOrganicScore: 0,
-  minPairAgeMinutes: 0,
+  minPairAgeMinutes: 5,
   partialTakeProfitMultiplier: 1.15,
   partialSellPercent: 50,
   priorityFeeSol: 0.0003,
@@ -90,6 +91,8 @@ export function passesFilters(pair, bot, now = Date.now()) {
   if (bot.maxDevHoldingPct > 0 && pair.devPct != null && pair.devPct > bot.maxDevHoldingPct) reasons.push('dev_holding');
   if (bot.maxDevLaunches > 0 && pair.devMints != null && pair.devMints > bot.maxDevLaunches) reasons.push('serial_launcher');
   if (bot.minOrganicScore > 0 && pair.organicScore != null && pair.organicScore < bot.minOrganicScore) reasons.push('organic');
+  // Liquidity leaving the pool in the last 5 minutes is how a rug starts: insiders pulling out or dumping.
+  if (pair.liquidityChange5m != null && pair.liquidityChange5m <= -LIQUIDITY_DROP_PCT) reasons.push('liquidity_falling');
   if (buys < bot.minBuys5m) reasons.push('buys');
   // Holder spread (from Jupiter's token data; skipped when a feed doesn't report it).
   if (bot.minHolders > 0 && pair.holders != null && pair.holders < bot.minHolders) reasons.push('holders');
@@ -275,7 +278,7 @@ export function createEngine({
       holders: num(t.holderCount), topHoldersPct: num(t.audit?.topHoldersPercentage),
       devPct: num(t.audit?.devBalancePercentage), devMints: num(t.audit?.devMints), isSus: t.audit?.isSus === true,
       organicScore: num(t.organicScore), traders5m: num(t.stats5m?.numTraders), organicBuyers5m: num(t.stats5m?.numOrganicBuyers),
-      bondingCurvePct: t.graduatedPool ? null : num(t.bondingCurve)
+      bondingCurvePct: t.graduatedPool ? null : num(t.bondingCurve), liquidityChange5m: num(t.stats5m?.liquidityChange)
     };
   }
   // GeckoTerminal pool -> the DexScreener-shaped pair the filters expect.
@@ -296,9 +299,10 @@ export function createEngine({
       pairCreatedAt: Date.parse(a.pool_created_at) || null
     };
   }
-  // New launches come from Jupiter's recent-tokens list, GeckoTerminal's newest pools and DexScreener's
+  // New launches come from Jupiter's recent-tokens and top organic lists, GeckoTerminal's newest pools and DexScreener's
   // latest profiles and boosts, whichever are answering. Tokens are watched for SEEN_TTL_MS and re-checked
   // every scan, so a launch that is too quiet at first can still be bought once it picks up.
+  let lastOrganicAt = 0;
   async function discover(now) {
     for (const [mint, at] of watch) if (now - at > SEEN_TTL_MS) watch.delete(mint);
     const add = mint => { if (mint && !watch.has(mint)) watch.set(mint, now); };
@@ -318,6 +322,14 @@ export function createEngine({
     if (solUsd) {
       try { for (const t of await feedJson(`${JUPITER_TOKENS}/recent`, 30_000) || []) keep(jupiterPair(t)); sources.jupiter = 'ok'; }
       catch (e) { sources.jupiter = e.message; }
+      // Coins with the most real (non-bot) buying in the last 5 minutes: older launches that survived the
+      // first minutes and are still drawing buyers, the kind that rug least.
+      // Fetched every 30 seconds, so it uses little of the Jupiter request budget.
+      if (now - lastOrganicAt >= 30_000) {
+        lastOrganicAt = now;
+        try { for (const t of await feedJson(`${JUPITER_TOKENS}/toporganicscore/5m?limit=100`, 60_000) || []) keep(jupiterPair(t)); sources.jupiterOrganic = 'ok'; }
+        catch (e) { sources.jupiterOrganic = e.message; }
+      }
     }
     try { for (const pool of (await feedJson(`${GECKOTERMINAL}/networks/solana/new_pools?page=1`, 90_000))?.data || []) keep(geckoPair(pool)); sources.geckoterminal = 'ok'; }
     catch (e) { sources.geckoterminal = e.message; }
