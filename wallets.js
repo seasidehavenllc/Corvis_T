@@ -6,21 +6,26 @@ export function deriveBotKeypair(keyBytes, index) {
   return Keypair.fromSeed(createHmac('sha256', keyBytes).update(`corvis-bot-wallet:${index}`).digest());
 }
 
-// Walk derived wallets in order until `gapLimit` in a row have never been used on-chain.
-// Returns the used wallets that are not already known, plus the next unused index.
-export async function scanDerivedWallets({ connection, keyBytes, knownIndexes, heldTokens, gapLimit = 20 }) {
+// Walk derived wallets in batches (one RPC call per 25 wallets, so public RPCs don't rate-limit it) until a
+// whole batch is empty. Returns funded wallets that are not already known, plus the next unused index.
+export async function scanDerivedWallets({ connection, keyBytes, knownIndexes, heldTokens, batch = 25 }) {
   const found = [];
-  let nextIndex = 0;
-  for (let i = 0, gap = 0; gap < gapLimit; i++) {
-    if (knownIndexes.has(i)) { gap = 0; nextIndex = i + 1; continue; }
-    const owner = deriveBotKeypair(keyBytes, i).publicKey;
-    const history = await connection.getSignaturesForAddress(owner, { limit: 1 }, 'confirmed');
-    if (!history.length) { gap++; continue; }
-    gap = 0;
-    nextIndex = i + 1;
-    const lamports = await connection.getBalance(owner, 'confirmed');
-    const tokens = await heldTokens(owner);
-    if (lamports > 0 || tokens > 0) found.push({ index: i, address: owner.toBase58(), lamports, tokens });
+  let nextIndex = Math.max(0, ...[...knownIndexes].map(i => i + 1));
+  for (let start = 0; ; start += batch) {
+    const indexes = Array.from({ length: batch }, (_, k) => start + k);
+    const keys = indexes.map(i => deriveBotKeypair(keyBytes, i).publicKey);
+    const infos = await connection.getMultipleAccountsInfo(keys, 'confirmed');
+    let any = false;
+    for (let k = 0; k < batch; k++) {
+      const i = indexes[k];
+      if (knownIndexes.has(i)) { any = true; continue; }
+      if (!infos[k]) continue;
+      any = true;
+      nextIndex = Math.max(nextIndex, i + 1);
+      const tokens = await heldTokens(keys[k]);
+      found.push({ index: i, address: keys[k].toBase58(), lamports: infos[k].lamports, tokens });
+    }
+    if (!any) break;
   }
   return { found, nextIndex };
 }

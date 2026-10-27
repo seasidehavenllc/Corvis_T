@@ -126,7 +126,7 @@ function newBotRecord(settings, walletIndex) {
   };
 }
 // Rebuild bots for derived wallets that have on-chain history but are missing from the database
-// (for example after Render's free plan restarts with an empty disk). Stops after 20 unused wallets in a row.
+// (for example after Render's free plan restarts with an empty disk). Checks 25 wallets per RPC call and stops at the first empty batch.
 let recovery = { done: false, recovered: 0, error: null };
 async function recoverWallets() {
   if (!/^[a-f0-9]{64}$/i.test(ENCRYPTION_KEY)) { recovery = { done: true, recovered: 0, error: null }; return; }

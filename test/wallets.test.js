@@ -10,18 +10,15 @@ test('derived wallets are deterministic and distinct per index', () => {
   assert.notEqual(deriveBotKeypair(key, 0).publicKey.toBase58(), deriveBotKeypair(Buffer.from('cd'.repeat(32), 'hex'), 0).publicKey.toBase58());
 });
 
-test('scan recovers funded wallets missing from the database and skips past used ones', async () => {
+test('scan recovers funded wallets missing from the database', async () => {
   const addr = i => deriveBotKeypair(key, i).publicKey.toBase58();
-  // Wallet 0 is known, 1 was used and emptied, 2 holds SOL, 4 holds only tokens; 3 and 5+ never used.
-  const used = new Set([addr(0), addr(1), addr(2), addr(4)]);
-  const sol = { [addr(2)]: 500_000_000 };
-  const tok = { [addr(4)]: 1 };
-  const connection = {
-    getSignaturesForAddress: async pk => used.has(pk.toBase58()) ? [{ signature: 'x' }] : [],
-    getBalance: async pk => sol[pk.toBase58()] || 0
-  };
-  const { found, nextIndex } = await scanDerivedWallets({ connection, keyBytes: key, knownIndexes: new Set([0]), heldTokens: async pk => tok[pk.toBase58()] || 0, gapLimit: 5 });
-  assert.deepEqual(found.map(f => f.index), [2, 4]);
+  // Wallet 0 is known, 2 holds SOL, 30 holds SOL in the second batch; everything else is empty.
+  const funded = { [addr(2)]: 500_000_000, [addr(30)]: 1_000 };
+  let calls = 0;
+  const connection = { getMultipleAccountsInfo: async pks => { calls++; return pks.map(pk => funded[pk.toBase58()] ? { lamports: funded[pk.toBase58()] } : null); } };
+  const { found, nextIndex } = await scanDerivedWallets({ connection, keyBytes: key, knownIndexes: new Set([0]), heldTokens: async () => 0, batch: 25 });
+  assert.deepEqual(found.map(f => f.index), [2, 30]);
   assert.equal(found[0].lamports, 500_000_000);
-  assert.equal(nextIndex, 5);
+  assert.equal(nextIndex, 31);
+  assert.equal(calls, 3, 'one RPC call per batch of 25');
 });
