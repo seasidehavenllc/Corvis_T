@@ -30,6 +30,7 @@ export const STRATEGY_DEFAULTS = {
   maxHoldMinutes: 30,
   trailingStopPercent: 12,
   slippageBps: 500,
+  maxPriceImpactPct: 8,
   priorityFeeSol: 0.0005,
   maxDailyLossSol: 0.2,
   paperBalanceSol: 1
@@ -270,8 +271,13 @@ export function createEngine({
     if (!quote?.outAmount || quote.outAmount === '0') throw new Error('No Jupiter route for this token.');
     return quote;
   }
-  async function jupiterSwap(owner, inputMint, outputMint, amount, bot) {
+  function checkImpact(quote, bot) {
+    const impact = Number(quote.priceImpactPct || 0) * 100;
+    if (bot.maxPriceImpactPct > 0 && impact > bot.maxPriceImpactPct) throw new Error(`price impact ${impact.toFixed(1)}% is over the ${bot.maxPriceImpactPct}% limit`);
+  }
+  async function jupiterSwap(owner, inputMint, outputMint, amount, bot, { buying = false } = {}) {
     const quote = await jupiterQuote(inputMint, outputMint, amount, bot);
+    if (buying) checkImpact(quote, bot);
     const { swapTransaction, lastValidBlockHeight } = await jupiterTrade(`${JUPITER}/swap`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -317,12 +323,9 @@ export function createEngine({
       const before = await connection.getBalance(owner.publicKey, 'confirmed');
       const lamports = Math.floor(bot.maxPositionSol * LAMPORTS_PER_SOL);
       if (before < lamports + 0.01 * LAMPORTS_PER_SOL) { log('warn', `${bot.name}: wallet balance too low for a ${bot.maxPositionSol} SOL buy.`); return null; }
-      const { signature } = await jupiterSwap(owner, SOL_MINT, position.mint, lamports, bot);
+      const { signature } = await jupiterSwap(owner, SOL_MINT, position.mint, lamports, bot, { buying: true });
       const after = await connection.getBalance(owner.publicKey, 'confirmed');
-      const held = (await tokenHoldings(owner.publicKey, position.mint)).reduce((s, a) => s + a.ui, 0);
       position.sizeSol = (before - after) / LAMPORTS_PER_SOL;
-      // Track exits against the price actually paid (including fees and account rent), not the quoted one.
-      if (held > 0) position.entryPrice = position.peakPrice = position.lastPrice = position.sizeSol / held;
       position.buySignature = signature;
     } else {
       // Paper fills use a real Jupiter quote (route, price impact) plus network and priority fees,
@@ -330,12 +333,16 @@ export function createEngine({
       const fee = TX_FEE_SOL + (bot.priorityFeeSol || 0);
       if (bot.paperBalanceSol < bot.maxPositionSol + fee) return null;
       const quote = await jupiterQuote(SOL_MINT, position.mint, Math.floor(bot.maxPositionSol * LAMPORTS_PER_SOL), bot);
+      checkImpact(quote, bot);
       position.tokenRaw = quote.outAmount;
       position.tokens = Number(quote.outAmount) / 10 ** (decimals.get(position.mint) ?? 6);
       position.sizeSol = bot.maxPositionSol + fee;
-      position.entryPrice = position.peakPrice = position.lastPrice = position.sizeSol / position.tokens;
       bot.paperBalanceSol -= position.sizeSol;
     }
+    // Exit rules compare against the same spot price feed the monitor uses. (P&L itself always comes
+    // from the SOL actually spent and received.)
+    const spot = (await pricesFor([position.mint]).catch(() => new Map())).get(position.mint);
+    if (spot > 0) position.entryPrice = position.peakPrice = position.lastPrice = spot;
     db.positions.push(position);
     log('info', `${bot.name} bought ${position.symbol} for ${position.sizeSol.toFixed(4)} SOL (${bot.mode}).`);
     return position;

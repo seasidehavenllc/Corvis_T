@@ -138,8 +138,8 @@ function renderSide() {
 }
 
 // ---------- bot form ----------
-const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl: 'stopLossPercent', fHold: 'maxHoldMinutes', fMax: 'maxPositionSol', fOpen: 'maxOpenPositions', fLoss: 'maxDailyLossSol', fLiq: 'minLiquidityUsd', fAge: 'maxPairAgeMinutes', fBuys: 'minBuys5m', fSlip: 'slippageBps', fTrail: 'trailingStopPercent', fRatio: 'minBuySellRatio', fPrio: 'priorityFeeSol' };
-const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.45, stopLossPercent: 15, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 5000, maxPairAgeMinutes: 30, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.2, priorityFeeSol: 0.0005 };
+const fields = { fName: 'name', fMode: 'mode', fTp: 'takeProfitMultiplier', fSl: 'stopLossPercent', fHold: 'maxHoldMinutes', fMax: 'maxPositionSol', fOpen: 'maxOpenPositions', fLoss: 'maxDailyLossSol', fLiq: 'minLiquidityUsd', fAge: 'maxPairAgeMinutes', fBuys: 'minBuys5m', fSlip: 'slippageBps', fTrail: 'trailingStopPercent', fRatio: 'minBuySellRatio', fPrio: 'priorityFeeSol', fImpact: 'maxPriceImpactPct' };
+const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.45, stopLossPercent: 15, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 5000, maxPairAgeMinutes: 30, minBuys5m: 10, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.2, priorityFeeSol: 0.0005, maxPriceImpactPct: 8 };
 function requireUnlock() { if (adminToken) return true; $('#unlockDialog').showModal(); return false; }
 function openBotForm(bot) {
   if (!requireUnlock()) return;

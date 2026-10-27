@@ -117,7 +117,9 @@ export function createMarket({ seed = 42, start = Date.parse('2026-10-27T00:00:0
       const t = state.tokens.get(inputMint === SOL_MINT ? outputMint : inputMint);
       if (!t || t.liquidityUsd < 100) return ok({ error: 'No routes found' });
       const amount = u.searchParams.get('amount');
-      return ok({ inputMint, outputMint, inAmount: amount, outAmount: quoteOut(t, inputMint, amount).toString(), slippageBps: Number(u.searchParams.get('slippageBps')) });
+      const liqSol = Math.max(t.liquidityUsd / 200 / 2, 0.01);
+      const tradeSol = inputMint === SOL_MINT ? Number(amount) / LAMPORTS_PER_SOL : Number(amount) / 10 ** DECIMALS * t.price;
+      return ok({ inputMint, outputMint, inAmount: amount, outAmount: quoteOut(t, inputMint, amount).toString(), slippageBps: Number(u.searchParams.get('slippageBps')), priceImpactPct: String(tradeSol / (liqSol + tradeSol)) });
     }
     if (u.pathname.endsWith('/swap')) {
       const { quoteResponse, userPublicKey } = JSON.parse(init.body);

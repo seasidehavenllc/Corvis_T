@@ -105,6 +105,7 @@
       <label>Slippage (bps) <input id="fSlip" type="number" min="10" max="5000" step="10" value="500" required></label>
       <label>Priority fee (max SOL) <input id="fPrio" type="number" min="0" max="0.01" step="0.0001" value="0.0005" required></label>
     </div>
+    <label>Max price impact (%, 0 = off) <input id="fImpact" type="number" min="0" max="100" step="0.5" value="8" required></label>
     <p class="muted small">Tokens are skipped unless mint and freeze authority are revoked. Each bot has its own encrypted wallet; you can withdraw or export its key at any time.</p>
     <div class="actions">
       <button class="btn btn-ghost" value="cancel" formnovalidate>Cancel</button>

@@ -242,8 +242,9 @@ function validateBotSettings(body, current = {}) {
     minLiquidityUsd: pick('minLiquidityUsd'), maxPairAgeMinutes: pick('maxPairAgeMinutes'), minBuys5m: pick('minBuys5m'),
     maxOpenPositions: pick('maxOpenPositions'), maxHoldMinutes: pick('maxHoldMinutes'), slippageBps: pick('slippageBps'),
     maxDailyLossSol: pick('maxDailyLossSol'), minBuySellRatio: pick('minBuySellRatio'),
-    trailingStopPercent: pick('trailingStopPercent'), priorityFeeSol: pick('priorityFeeSol')
+    trailingStopPercent: pick('trailingStopPercent'), priorityFeeSol: pick('priorityFeeSol'), maxPriceImpactPct: pick('maxPriceImpactPct')
   };
+  if (!(strategy.maxPriceImpactPct >= 0 && strategy.maxPriceImpactPct <= 100)) return { error: 'Max price impact must be 0 (off) to 100%.' };
   if (!(strategy.minBuySellRatio >= 0 && strategy.minBuySellRatio <= 20)) return { error: 'Buy/sell ratio must be between 0 and 20.' };
   if (!(strategy.trailingStopPercent >= 0 && strategy.trailingStopPercent < 100)) return { error: 'Trailing stop must be 0 (off) to 99%.' };
   if (!(strategy.priorityFeeSol >= 0 && strategy.priorityFeeSol <= 0.01)) return { error: 'Priority fee must be between 0 and 0.01 SOL.' };
