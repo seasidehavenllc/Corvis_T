@@ -71,6 +71,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 function log(level, message) {
   events.unshift({ at: new Date().toISOString(), level, message });
   if (events.length > 100) events.pop();
+  console.log(`[${level}] ${message}`);
 }
 function requireAdmin(req, res, next) {
   if (!ADMIN_TOKEN) return res.status(503).json({ error: 'Set ADMIN_API_TOKEN in deployment environment before using wallet-changing endpoints.' });
@@ -140,6 +141,14 @@ async function recoverWallets() {
       db.bots.push(bot);
       recovery.recovered++;
       log('warn', `Recovered ${bot.name} (${w.lamports / LAMPORTS_PER_SOL} SOL, ${w.tokens} token account(s)). Its trade history was not saved.`);
+    }
+    // SEED_PAPER_BOT=true starts a paper bot on an empty install, useful for watching the engine on real markets.
+    if (process.env.SEED_PAPER_BOT === 'true' && !db.bots.length) {
+      const bot = newBotRecord({ name: 'Paper sniper', mode: 'paper' }, nextWalletIndex());
+      db.nextWalletIndex = bot.walletIndex + 1;
+      Object.assign(bot, { enabled: true, status: 'Running · paper' });
+      db.bots.push(bot);
+      log('info', 'Started a paper bot (SEED_PAPER_BOT).');
     }
     await saveDb();
     recovery.done = true;
