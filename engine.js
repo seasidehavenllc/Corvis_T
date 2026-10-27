@@ -245,7 +245,7 @@ export function createEngine({
     }
     return out;
   }
-  let solUsd = null;
+  let solUsd = null, priceError = null; // priceError: why the SOL price last failed, shown in the scan log
   let lastSearchAt = 0;
   // Current SOL price of each token, from Jupiter's price API, with DexScreener filling any gaps.
   async function pricesFor(mints) {
@@ -259,7 +259,7 @@ export function createEngine({
         solUsd = sol;
         for (const m of ids.slice(1)) { const usd = Number(data?.[m]?.usdPrice); if (usd > 0) out.set(m, usd / sol); }
       }
-    } catch (e) { health.lastError = `Jupiter price: ${e.message}`; }
+    } catch (e) { priceError = e.message; health.lastError = `Jupiter price: ${e.message}`; }
     const missing = mints.filter(m => !out.has(m));
     if (missing.length) for (const [m, pair] of await dexPairs(missing)) out.set(m, Number(pair.priceNative));
     return out;
@@ -319,7 +319,8 @@ export function createEngine({
     };
     const sources = {};
     if (!solUsd) await pricesFor([]);
-    if (solUsd) {
+    if (!solUsd) sources.jupiter = `no SOL price: ${priceError || 'no answer'}`;
+    else {
       try { for (const t of await feedJson(`${JUPITER_TOKENS}/recent`, 30_000) || []) keep(jupiterPair(t)); sources.jupiter = 'ok'; }
       catch (e) { sources.jupiter = e.message; }
       // Coins with the most real (non-bot) buying in the last 5 minutes: older launches that survived the
@@ -776,7 +777,7 @@ export function createEngine({
       if (bought) await save();
       if (now - lastSummaryAt >= 60_000) {
         health.skips = { ...skips };
-        log('info', `Scan: watching ${health.watching} tokens. Skipped in the last minute: ${Object.entries(skips).map(([k, n]) => `${k.replace('_', ' ')} ${n}`).join(', ') || 'none'}.`);
+        log('info', `Scan: watching ${health.watching} tokens. Skipped in the last minute: ${Object.entries(skips).map(([k, n]) => `${k.replace('_', ' ')} ${n}`).join(', ') || 'none'}.${Object.entries(health.sources || {}).filter(([, v]) => v !== 'ok').map(([k, v]) => ` ${k}: ${v}.`).join('')}`);
         for (const k of Object.keys(skips)) delete skips[k];
         lastSummaryAt = now;
       }
