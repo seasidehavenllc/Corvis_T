@@ -205,10 +205,7 @@ function openBotForm(bot) {
   $('#fSlFollow').checked = (bot || defaults).stopLossFollowsPrice ?? defaults.stopLossFollowsPrice;
   $('#fFollow').value = (bot?.followWallets || []).join('\n');
   $('#fFollowOnly').checked = Boolean(bot?.followOnly);
-<<<<<<< HEAD
   $('#fAutoFollow').checked = Boolean(bot?.autoFollow);
-=======
->>>>>>> origin/main
   $('#followReport').innerHTML = '';
   feeHint();
   botError('');
@@ -222,11 +219,8 @@ function feeHint() {
 }
 // Grade each pasted wallet from its last 100 transactions before trusting it with copy trades.
 function walletVerdict(r) {
-<<<<<<< HEAD
   if (r.read != null && r.read < r.of * 0.8) return ['', `only read ${r.read} of ${r.of} trades (Solana connection busy): try again`];
   if (r.sentAway >= 3 && r.closed < 8) return ['down', 'sends coins to other wallets instead of selling: skip'];
-=======
->>>>>>> origin/main
   if (r.swapsPerHour > 30) return ['down', 'trades like a bot: skip'];
   if (r.closed < 8) return ['', 'too few finished trades to judge'];
   if (r.pnlSol > 0 && r.winRate >= 0.4) return ['up', 'looks good'];
