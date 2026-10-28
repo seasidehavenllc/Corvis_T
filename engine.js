@@ -93,7 +93,7 @@ export function profitableTraders(trades) {
 }
 const QUOTE_MINTS = new Set([SOL_MINT, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']);
 
-// Sniper defaults: buy fresh launches in their first half hour as soon as they pass the rug checks, and
+// Sniper defaults: buy fresh launches from 3 to 30 minutes old as soon as they pass the rug checks, and
 // scalp them: bank half at +12%, sell the rest at +30%, a 10% stop that follows the price up and a
 // 10-minute max hold. Set breakoutPct (e.g. 10) and a higher minPairAgeMinutes for the pickier
 // breakout style instead.
@@ -118,7 +118,7 @@ export const STRATEGY_DEFAULTS = {
   maxDevHoldingPct: 5,
   maxDevLaunches: 30,
   minOrganicScore: 0,
-  minPairAgeMinutes: 1,
+  minPairAgeMinutes: 3,
   partialTakeProfitMultiplier: 1.12,
   partialSellPercent: 50,
   maxSingleHolderPct: 10,
