@@ -441,7 +441,7 @@ export function createEngine({
     if (!t?.id || !(price > 0)) return null;
     return {
       chainId: 'solana', dexId: t.firstPool?.id ? 'jupiter' : 'unknown', pairAddress: t.firstPool?.id,
-      url: `https://jup.ag/tokens/${t.id}`, baseToken: { address: t.id, symbol: t.symbol || '?' }, quoteToken: { address: SOL_MINT },
+      url: `https://jup.ag/tokens/${t.id}`, baseToken: { address: t.id, symbol: t.symbol || '?', name: t.name }, quoteToken: { address: SOL_MINT },
       priceNative: String(price), liquidity: { usd: Number(t.liquidity) || 0 },
       txns: { m5: { buys: t.stats5m?.numBuys || 0, sells: t.stats5m?.numSells || 0 } },
       pairCreatedAt: Date.parse(t.firstPool?.createdAt) || null,
@@ -854,6 +854,7 @@ export function createEngine({
     const position = await withWallet(bot, () => openPosition(bot, pair, sizeSol, { manual: true }));
     if (!position) throw new Error('the buy did not go through');
     bot.watchTokens = (bot.watchTokens || []).filter(m => m !== mint);
+    if (bot.watchNames) delete bot.watchNames[mint];
     await save();
     return position;
   }
@@ -1243,6 +1244,8 @@ export function createEngine({
         priceHistory.set(m, h);
       }
       lastCandidates = candidates;
+      // Names for coins watched by hand, so the bot card can show them.
+      for (const b of db.bots) for (const m of b.watchTokens || []) { const sym = candidates.get(m)?.baseToken?.symbol; if (sym && sym !== '?') (b.watchNames ||= {})[m] = sym; }
       // Coins a followed wallet just bought may not be in any feed yet: look them up directly.
       const copied = [...signals.keys()].filter(m => !candidates.has(m));
       if (copied.length && solUsd) {
@@ -1286,7 +1289,7 @@ export function createEngine({
             const position = await withWallet(bot, () => openPosition(bot, pair));
             if (position) {
               bought = true;
-              if (picked) { bot.watchTokens = bot.watchTokens.filter(m => m !== mint); log('info', `${bot.name} bought watched coin ${position.symbol} on a ${pair.breakoutRisePct.toFixed(1)}% breakout.`); }
+              if (picked) { bot.watchTokens = bot.watchTokens.filter(m => m !== mint); if (bot.watchNames) delete bot.watchNames[mint]; log('info', `${bot.name} bought watched coin ${position.symbol} on a ${pair.breakoutRisePct.toFixed(1)}% breakout.`); }
               if (leader) { position.leader = leader; position.features.copied = true; log('info', `${bot.name} copied ${leader.slice(0, 4)}…${leader.slice(-4)} into ${position.symbol}.`); }
             }
           }
@@ -1362,6 +1365,13 @@ export function createEngine({
     },
     stop() { timers.splice(0).forEach(clearInterval); },
     buyToken: (bot, mint, sizeSol) => buyToken(bot, mint, sizeSol),
+    // A coin's name and market, for showing what an address is before buying or watching it.
+    async tokenInfo(mint) {
+      const pair = await lookupPair(mint);
+      if (!pair) return null;
+      return { mint, symbol: pair.baseToken.symbol, name: pair.baseToken.name || null, priceSol: Number(pair.priceNative), liquidityUsd: pair.liquidity?.usd ?? null,
+        ageMin: pair.pairCreatedAt ? Math.round((clock() - pair.pairCreatedAt) / 60_000) : null, holders: pair.holders ?? null };
+    },
     tick, monitor, scan, watchLeaders: () => watchLeaders(clock()), scout: () => scout(clock()), gradeWallet, health, liveAllowed, jupiterSwap, estimateMultiple,
     adoptHoldings: (bot, mints) => withWallet(bot, () => adoptHoldings(bot, mints)),
     cleanupWallet: bot => withWallet(bot, () => cleanupWallet(bot)),

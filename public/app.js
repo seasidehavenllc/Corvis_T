@@ -122,11 +122,12 @@ function renderBots() {
           <input class="mono" data-token="mint" data-id="${esc(b.id)}" placeholder="Token address (CA)" value="${esc(tokenDrafts[b.id]?.mint || '')}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
           <input data-token="amount" data-id="${esc(b.id)}" type="number" min="0" step="0.01" title="SOL to spend on Buy now" value="${esc(tokenDrafts[b.id]?.amount ?? b.maxPositionSol)}">
         </div>
+        ${tokenDrafts[b.id]?.info ? `<div class="small muted" data-token-info="${esc(b.id)}">${tokenDrafts[b.id].info}</div>` : `<div class="small muted" data-token-info="${esc(b.id)}" hidden></div>`}
         <div class="token-row">
           <button class="btn btn-start btn-sm" data-act="buytoken" data-id="${esc(b.id)}" title="Buy this coin now for the SOL amount; the bot's sell rules take over">Buy now</button>
           <button class="btn btn-sm" data-act="watchtoken" data-id="${esc(b.id)}" title="Track this coin and buy it (for the bot's trade size) the moment it breaks out">Watch</button>
         </div>
-        ${b.watchTokens?.length ? `<div class="chips">${b.watchTokens.map(m => `<span class="chip" title="${esc(m)}">👀 ${esc(short(m))} <button class="chip-x" data-act="unwatch" data-id="${esc(b.id)}" data-mint="${esc(m)}" aria-label="Stop watching">×</button></span>`).join('')}${b.enabled ? '' : '<span class="chip">start the bot to buy watched coins</span>'}</div>` : ''}
+        ${b.watchTokens?.length ? `<div class="chips">${b.watchTokens.map(m => `<span class="chip">👀 <button class="chip-x" data-copy="${esc(m)}" title="Copy address ${esc(m)}"><b>${esc(b.watchNames?.[m] || '?')}</b> ${esc(short(m))} ⧉</button> <button class="chip-x" data-act="unwatch" data-id="${esc(b.id)}" data-mint="${esc(m)}" aria-label="Stop watching">×</button></span>`).join('')}${b.enabled ? '' : '<span class="chip">start the bot to buy watched coins</span>'}</div>` : ''}
       </div>
       <div class="bot-actions">
         ${b.enabled ? `<button class="btn btn-stop btn-sm" data-act="pause" data-id="${esc(b.id)}">Pause</button>` : `<button class="btn btn-start btn-sm" data-act="start" data-id="${esc(b.id)}">Start</button>`}
@@ -300,9 +301,33 @@ $('#botForm').addEventListener('submit', async e => {
 
 // ---------- bot actions ----------
 const botById = id => state.overview.bots.find(b => b.id === id);
+// Show which coin a pasted address is, so it can be checked before buying or watching.
+const lookupTimers = {};
+function showTokenInfo(botId, html) {
+  (tokenDrafts[botId] ||= {}).info = html;
+  const el = document.querySelector(`[data-token-info="${CSS.escape(botId)}"]`);
+  if (el) { el.innerHTML = html; el.hidden = !html; }
+}
 document.addEventListener('input', e => {
   const field = e.target.closest?.('[data-token]');
-  if (field) (tokenDrafts[field.dataset.id] ||= {})[field.dataset.token] = field.value;
+  if (!field) return;
+  const id = field.dataset.id;
+  (tokenDrafts[id] ||= {})[field.dataset.token] = field.value;
+  if (field.dataset.token !== 'mint') return;
+  clearTimeout(lookupTimers[id]);
+  tokenDrafts[id].symbol = null;
+  const value = field.value.trim();
+  if (!value || !adminToken) return showTokenInfo(id, '');
+  showTokenInfo(id, 'Looking up coin…');
+  lookupTimers[id] = setTimeout(async () => {
+    try {
+      const t = await api(`/api/token/${encodeURIComponent(value)}`);
+      if ((tokenDrafts[id]?.mint || '').trim() !== value) return;
+      tokenDrafts[id].symbol = t.symbol;
+      const facts = [t.liquidityUsd != null ? `liq $${Math.round(t.liquidityUsd).toLocaleString()}` : '', t.holders != null ? `${t.holders.toLocaleString()} holders` : '', t.ageMin != null ? `${t.ageMin < 120 ? `${t.ageMin}m` : t.ageMin < 2880 ? `${Math.round(t.ageMin / 60)}h` : `${Math.round(t.ageMin / 1440)}d`} old` : ''].filter(Boolean).join(' · ');
+      showTokenInfo(id, `<b class="up">${esc(t.symbol)}</b>${t.name ? ` ${esc(t.name)}` : ''} <button class="chip-x" data-copy="${esc(t.mint)}" title="Copy address">${esc(short(t.mint))} ⧉</button>${facts ? `<br>${esc(facts)}` : ''}`);
+    } catch (err) { if ((tokenDrafts[id]?.mint || '').trim() === value) showTokenInfo(id, `<span class="down">${esc(err.message)}</span>`); }
+  }, 400);
 });
 document.addEventListener('click', async e => {
   const copy = e.target.closest('[data-copy]');
@@ -327,11 +352,11 @@ document.addEventListener('click', async e => {
       if (!mint) return toast('Paste a token address first.', true);
       if (act.dataset.act === 'watchtoken') {
         await post(`/api/bots/${encodeURIComponent(bot.id)}/watch`, { mint });
-        toast(`${bot.name} is watching ${short(mint)}. It buys ${bot.maxPositionSol} SOL when the price breaks out${bot.enabled ? '' : ' (start the bot first)'}.`);
+        toast(`${bot.name} is watching ${tokenDrafts[bot.id]?.symbol || short(mint)}. It buys ${bot.maxPositionSol} SOL when the price breaks out${bot.enabled ? '' : ' (start the bot first)'}.`);
       } else {
         const amountSol = Number(tokenDrafts[bot.id]?.amount ?? bot.maxPositionSol);
         if (!(amountSol > 0)) return toast('Enter a SOL amount.', true);
-        if (!confirm(`${bot.mode === 'live' ? 'LIVE: spend real SOL. ' : ''}Buy ${amountSol} SOL of ${short(mint)} with ${bot.name} now?\n\nThe bot's take profit, stop loss and rug guard will sell it.`)) return;
+        if (!confirm(`${bot.mode === 'live' ? 'LIVE: spend real SOL. ' : ''}Buy ${amountSol} SOL of ${tokenDrafts[bot.id]?.symbol || short(mint)} with ${bot.name} now?\n\nThe bot's take profit, stop loss and rug guard will sell it.`)) return;
         act.disabled = true;
         try { const r = await post(`/api/bots/${encodeURIComponent(bot.id)}/buy`, { mint, amountSol }); toast(`${bot.name} bought ${r.symbol} for ${r.sizeSol.toFixed(4)} SOL.`); }
         finally { act.disabled = false; }
