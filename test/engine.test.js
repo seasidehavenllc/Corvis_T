@@ -399,6 +399,19 @@ test('watch: a pasted coin is tracked and bought on its breakout', async () => {
   assert.deepEqual(db.bots[0].watchTokens, []);
 });
 
+test('coins whose pool stays too small for every bot are dropped from the watchlist after 10 minutes', async () => {
+  let t = Date.now(), liq = 100;
+  const fetchImpl = async url => ({ ok: true, json: async () => url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }] : url.includes('token-boosts') ? [] : url.includes('dexscreener.com/tokens') ? [pair({ liquidity: { usd: liq } })] : [] });
+  const db = { bots: [{ ...bot, paperBalanceSol: 1, stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection: {}, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => t });
+  await engine.scan();
+  assert.equal(engine.health.watching, 1);
+  t += 5 * 60_000; await engine.scan();
+  assert.equal(engine.health.watching, 1, 'still young: may grow');
+  t += 6 * 60_000; await engine.scan();
+  assert.equal(engine.health.watching, 0, 'dropped after 10 minutes too small');
+});
+
 test('a coin name launched on more than one mint is skipped as a copycat', async () => {
   const other = Keypair.generate().publicKey.toBase58();
   const quote = url => { const u = new URL(url); const amt = Number(u.searchParams.get('amount')); return { outAmount: String(Math.floor(u.searchParams.get('inputMint') === SOL_MINT ? amt / 1e9 / 0.001 * 1e6 : amt / 1e6 * 0.001 * 1e9)) }; };
