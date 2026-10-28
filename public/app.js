@@ -174,7 +174,7 @@ function positionRows(positions, withBot = true) {
 }
 function tradeRows(trades, withBot = true) {
   if (!trades.length) return '<p class="muted">No trades yet.</p>';
-  return `<table><thead><tr><th>Closed</th>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>Rug check</th><th>In SOL</th><th>Out SOL</th><th>P&amp;L</th><th>Exit</th><th></th></tr></thead><tbody>${trades.map(t => `<tr><td>${ago(t.closedAt)} ago</td>${withBot ? `<td>${esc(t.botName || '')}</td>` : ''}<td>${esc(t.symbol)} <span class="pill">${esc(t.mode)}</span>${t.features?.copied ? ' <span class="pill">copy</span>' : ''}</td><td>${rugTrade(t)}</td><td>${sol(t.entrySol)}</td><td>${sol(Math.max(0, t.exitSol))}</td><td>${signed(t.pnlSol)}</td><td>${esc(REASONS[t.reason] || String(t.reason).replace('_', ' '))}${t.partialSol ? ' <span class="muted small">(part banked)</span>' : ''}${gapped(t) ? ' <span class="muted small">(price crashed past it)</span>' : ''}</td><td>${explorer(t.sellSignature)}</td></tr>`).join('')}</tbody></table>`;
+  return `<table><thead><tr><th>Closed</th>${withBot ? '<th>Bot</th>' : ''}<th>Token</th><th>Rug check</th><th>In SOL</th><th>Out SOL</th><th>P&amp;L</th><th>Exit</th><th></th></tr></thead><tbody>${trades.map(t => `<tr><td>${ago(t.closedAt)} ago</td>${withBot ? `<td>${esc(t.botName || '')}</td>` : ''}<td>${esc(t.symbol)} <span class="pill">${esc(t.mode)}</span>${t.features?.copied ? ' <span class="pill">copy</span>' : ''}</td><td>${rugTrade(t)}</td><td>${sol(t.entrySol)}</td><td>${sol(Math.max(0, t.exitSol))}</td><td>${signed(t.pnlSol)}</td><td>${esc(REASONS[t.reason] || String(t.reason).replace('_', ' '))}${t.partialSol ? ' <span class="muted small">(part banked)</span>' : ''}${t.peakMultiple > 1 ? ` <span class="muted small">(peak +${Math.round((t.peakMultiple - 1) * 100)}%)</span>` : ''}${gapped(t) ? ' <span class="muted small">(price crashed past it)</span>' : ''}</td><td>${explorer(t.sellSignature)}</td></tr>`).join('')}</tbody></table>`;
 }
 // Which entry signals have actually paid off, from this server's own closed trades.
 // Wallets the bot found and graded itself; bots with auto-find on copy these.
@@ -213,7 +213,7 @@ const GAIN_FIELDS = new Set(['fTp', 'fPartTp']);
 const gain = m => `+${+((m - 1) * 100).toFixed(1)}%`;
 // A stop or profit floor that sold well below its own level: the price fell through it between two checks.
 const gapped = t => ['stop_loss', 'trailing_stop', 'protect_profit'].includes(t.reason) && t.entrySol > 0 && t.pnlSol / t.entrySol <= -0.3;
-const REASONS = { take_profit: 'take profit', stop_loss: 'stop loss', trailing_stop: 'trailing stop', max_hold: 'time limit', protect_profit: 'profit floor', unsellable: 'unsellable', manual: 'sold by you', rug_warning: 'rug warning', leader_sold: 'copied wallet sold' };
+const REASONS = { take_profit: 'take profit', stop_loss: 'stop loss', trailing_stop: 'trailing stop', max_hold: 'time limit', protect_profit: 'profit floor', crash_signal: 'chart turned down', unsellable: 'unsellable', manual: 'sold by you', rug_warning: 'rug warning', leader_sold: 'copied wallet sold' };
 // Strategy presets the form can load. Sniper is the default: fresh launches bought as soon as they pass
 // the rug checks, scalped fast. Breakout waits for older coins that are already climbing.
 const PRESETS = {

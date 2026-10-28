@@ -20,6 +20,9 @@ export const JUPITER_HEADERS = JUP_KEY ? { 'x-api-key': JUP_KEY } : {};
 export const JUPITER_RPM = Number(process.env.JUPITER_RPM || (JUP_KEY ? 60 : 50));
 const TX_FEE_SOL = 0.000005;
 const LOCKED_FLOOR = 1.02; // whole-trade multiple kept once the first target is banked
+const CRASH_SIGNALS = 2; // chart signals that must agree before a winner is sold early
+const CRASH_ARM = 1.12; // a trade is watched for a turn once it has been up this much (or its first target banked)
+const TICK_WINDOW_MS = 3 * 60_000; // price ticks kept per open position for the chart signals
 const NO_ROUTE = 'No Jupiter route for this token: nobody can buy it right now (its pool is drained or moving). The bot keeps retrying.';
 const AUDIT_KEYS = ['holders', 'topHoldersPct', 'devPct', 'devMints', 'isSus', 'organicScore', 'traders5m', 'organicBuyers5m', 'bondingCurvePct', 'liquidityChange5m'];
 const SEEN_TTL_MS = 2 * 60 * 60 * 1000; // tokens are tracked this long after first sight, waiting for a breakout
@@ -301,6 +304,45 @@ export function exitReason(position, bot, multiple, now = Date.now()) {
   if (trail > 0 && peak >= 1 + trail && (multiple <= peak * (1 - trail) || multiple <= 1)) return 'trailing_stop';
   if (now - Date.parse(position.openedAt) >= bot.maxHoldMinutes * 60_000) return 'max_hold';
   return null;
+}
+
+// Chart reading for a trade that is already up: the indicators chart traders use, run on the position's own
+// price ticks, so the rest of a winner is sold when the move turns rather than after a dump runs through the
+// stop. ticks: [{ at, price }] oldest first, covering the last few minutes. flow: DexScreener's 5-minute
+// buy and sell counts, when known. Returns the names of the signals that fired.
+export function crashSignals(ticks, flow = null) {
+  const out = [];
+  if (ticks.length < 8 || ticks[ticks.length - 1].at - ticks[0].at < 30_000) return out;
+  const last = ticks[ticks.length - 1];
+  // Moving-average cross: a 10-second EMA dropping under a 45-second EMA, with the price under both.
+  // Weighted by time, since ticks do not arrive evenly.
+  let fast = ticks[0].price, slow = fast;
+  for (let i = 1; i < ticks.length; i++) {
+    const dt = ticks[i].at - ticks[i - 1].at;
+    fast += (ticks[i].price - fast) * (1 - Math.exp(-dt / 10_000));
+    slow += (ticks[i].price - slow) * (1 - Math.exp(-dt / 45_000));
+  }
+  if (fast < slow * 0.995 && last.price < fast) out.push('ema_cross');
+  // RSI(14) on 5-second candles: momentum that was overbought (70+) and has rolled over to 45 or less.
+  const closes = [];
+  let bar = null;
+  for (const t of ticks) {
+    const b = Math.floor(t.at / 5_000);
+    if (b === bar) closes[closes.length - 1] = t.price; else { closes.push(t.price); bar = b; }
+  }
+  const rsi = [];
+  for (let i = 14; i < closes.length; i++) {
+    let up = 0, down = 0;
+    for (let j = i - 13; j <= i; j++) { const d = closes[j] - closes[j - 1]; if (d > 0) up += d; else down -= d; }
+    rsi.push(up + down > 0 ? 100 * up / (up + down) : 50);
+  }
+  if (rsi.length >= 2 && Math.max(...rsi.slice(0, -1)) >= 70 && rsi[rsi.length - 1] <= 45) out.push('rsi_rollover');
+  // Sharp drop: 5% or more off the high of the last 15 seconds.
+  const recentHigh = Math.max(...ticks.filter(t => last.at - t.at <= 15_000).map(t => t.price));
+  if (last.price <= recentHigh * 0.95) out.push('sharp_drop');
+  // Selling volume: sells outnumbering buys by 20% or more over the last 5 minutes.
+  if (flow && flow.sells >= 10 && flow.sells > flow.buys * 1.2) out.push('sell_pressure');
+  return out;
 }
 
 // Trade journal: for each signal seen at entry, split trades into ranges and show how each range did.
@@ -913,6 +955,7 @@ export function createEngine({
       id: randomUUID(), botId: bot.id, mode: position.mode, mint: position.mint, symbol: position.symbol,
       entrySol: position.sizeSol, exitSol, pnlSol, multiple: exitSol / position.sizeSol, reason,
       partialSol: position.realizedSol || 0, features: position.features || null,
+      peakMultiple: Math.max(position.peakSeen || 0, position.peakMultiple || 0, exitSol / position.sizeSol),
       openedAt: position.openedAt, closedAt: iso(),
       buySignature: position.buySignature || null, sellSignature
     };
@@ -921,7 +964,7 @@ export function createEngine({
     bot.stats.trades += 1;
     if (pnlSol > 0) bot.stats.wins += 1; else bot.stats.losses += 1;
     bot.stats.realizedPnlSol += pnlSol;
-    log(pnlSol > 0 ? 'info' : 'warn', `${bot.name} sold ${position.symbol} (${reason.replace('_', ' ')}): ${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL.`);
+    log(pnlSol > 0 ? 'info' : 'warn', `${bot.name} sold ${position.symbol} (${reason.replace('_', ' ')}): ${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL. Peak ${trade.peakMultiple >= 1 ? '+' : ''}${((trade.peakMultiple - 1) * 100).toFixed(0)}%.`);
     return trade;
   }
 
@@ -994,7 +1037,14 @@ export function createEngine({
     const timeUp = now - Date.parse(position.openedAt) >= bot.maxHoldMinutes * 60_000;
     const est = estimateMultiple(position);
     // Within 5% of take profit counts as a hint too, so a fast spike is confirmed and sold without waiting.
-    const hint = exitReason(position, bot, est, now) || (partialDue(position, bot, est) ? 'partial' : null) ||
+    // Once a trade has been up, watch its chart and sell before a turn becomes a dump.
+    const armAt = bot.partialTakeProfitMultiplier > 1 ? bot.partialTakeProfitMultiplier : CRASH_ARM;
+    // Highest value seen, quoted or estimated from the spot price; kept apart from the stop's peak, which only moves on quotes.
+    position.peakSeen = Math.max(position.peakSeen || 0, position.peakMultiple || 0, est);
+    const armed = position.partialDone || position.peakSeen >= armAt;
+    const signals = armed ? crashSignals(ticks.get(position.mint) || [], flows.get(position.mint)) : [];
+    const crash = signals.length >= CRASH_SIGNALS ? 'crash_signal' : null;
+    const hint = exitReason(position, bot, est, now) || crash || (partialDue(position, bot, est) ? 'partial' : null) ||
       (est >= bot.takeProfitMultiplier * 0.95 ? 'near_target' : null);
     // Re-quote as often as the budget allows: about 40% of Jupiter requests go to checking open positions.
     // When no bot is looking for a buy, the scan needs no quotes and checks get the whole background share.
@@ -1018,7 +1068,8 @@ export function createEngine({
       if (hint || timeUp || e.message === NO_ROUTE) throw e;
       return;
     }
-    const reason = exitReason(position, bot, position.multiple, now);
+    const reason = exitReason(position, bot, position.multiple, now) || crash;
+    if (reason === 'crash_signal') log('info', `${bot.name}: ${position.symbol} chart is turning down (${signals.join(', ').replace(/_/g, ' ')}). Selling the rest.`);
     if (reason) await closePosition(bot, position, reason, { quote: position.mode === 'paper' ? quote : null });
     else if (partialDue(position, bot, position.multiple)) await sellPart(bot, position, now);
   }
@@ -1159,6 +1210,8 @@ export function createEngine({
 
   // Fast loop: price every open position and sell the moment an exit rule triggers.
   let lastPriceAt = 0, lastDexAt = 0, lastSaveAt = 0, dexMiss = new Set();
+  const ticks = new Map(); // mint -> [{ at, price }] for open positions, for the chart signals
+  const flows = new Map(); // mint -> DexScreener 5-minute { buys, sells }
   async function monitor() {
     if (monitoring) return;
     monitoring = true;
@@ -1177,7 +1230,7 @@ export function createEngine({
         const rest = mints.filter(m => !prices.has(m));
         if (rest.length && available(DEX_HOST) && now - lastDexAt >= DEX_PRICE_MS) {
           lastDexAt = now;
-          for (const [m, pair] of await dexPairs(rest)) prices.set(m, Number(pair.priceNative));
+          for (const [m, pair] of await dexPairs(rest)) { prices.set(m, Number(pair.priceNative)); if (pair.txns?.m5) flows.set(m, pair.txns.m5); }
           dexMiss = new Set(rest.filter(m => !prices.has(m)));
         }
         const missing = rest.filter(m => !available(DEX_HOST) || dexMiss.has(m));
@@ -1186,6 +1239,14 @@ export function createEngine({
           for (const [m, price] of await pricesFor(missing)) prices.set(m, price);
         }
         for (const position of open) { const price = prices.get(position.mint); if (price > 0) position.lastPrice = price; }
+        for (const m of mints) {
+          const price = prices.get(m);
+          const t = ticks.get(m) || [];
+          if (price > 0 && (!t.length || now - t[t.length - 1].at >= 1_000)) t.push({ at: now, price });
+          while (t.length && now - t[0].at > TICK_WINDOW_MS) t.shift();
+          ticks.set(m, t);
+        }
+        for (const m of ticks.keys()) if (!mints.includes(m)) { ticks.delete(m); flows.delete(m); }
         await watchInsiders(open, now).catch(e => { health.lastError = `Rug watch: ${e.message}`; });
         await Promise.all(open.map(position => {
           const bot = db.bots.find(b => b.id === position.botId);
