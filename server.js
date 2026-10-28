@@ -1,6 +1,6 @@
 import express from 'express';
 import { calculateDevFeeLamports } from './policy.js';
-import { createEngine, STRATEGY_DEFAULTS, MAX_FOLLOWED, tradeJournal } from './engine.js';
+import { createEngine, STRATEGY_DEFAULTS, MAX_FOLLOWED, WATCH_MAX, tradeJournal } from './engine.js';
 import { deriveBotKeypair as deriveFromKey, scanDerivedWallets } from './wallets.js';
 import { runSelfTest } from './selftest.js';
 import path from 'node:path';
@@ -418,6 +418,45 @@ app.post('/api/bots/:id/cleanup', requireAdmin, async (req, res) => {
   if (!bot) return res.status(404).json({ error: 'Bot not found.' });
   try { res.json(await engine.cleanupWallet(bot)); }
   catch (e) { log('error', `${bot.name}: wallet clean-up failed: ${e.message}`); res.status(502).json({ error: e.message }); }
+});
+// Buy a coin by its address now, or have the bot watch it and buy on a breakout.
+app.post('/api/bots/:id/buy', requireAdmin, async (req, res) => {
+  const bot = db.bots.find(b => b.id === req.params.id);
+  if (!bot) return res.status(404).json({ error: 'Bot not found.' });
+  try {
+    let mint;
+    try { mint = requirePublicKey(String(req.body?.mint || '').trim(), 'token address').toBase58(); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+    const amountSol = Number(req.body?.amountSol);
+    if (!(Number.isFinite(amountSol) && amountSol > 0 && amountSol <= 100)) return res.status(400).json({ error: 'Enter a SOL amount between 0 and 100.' });
+    const position = await engine.buyToken(bot, mint, amountSol);
+    res.json({ symbol: position.symbol, sizeSol: position.sizeSol });
+  } catch (e) {
+    log('warn', `${bot.name}: manual buy failed: ${e.message}`);
+    res.status(e.status || 502).json({ error: `Buy failed: ${e.message}` });
+  }
+});
+app.post('/api/bots/:id/watch', requireAdmin, async (req, res) => {
+  const bot = db.bots.find(b => b.id === req.params.id);
+  if (!bot) return res.status(404).json({ error: 'Bot not found.' });
+  try {
+    const mint = requirePublicKey(String(req.body?.mint || '').trim(), 'token address').toBase58();
+    const list = bot.watchTokens || [];
+    if (!list.includes(mint)) {
+      if (list.length >= WATCH_MAX) return res.status(400).json({ error: `A bot can watch up to ${WATCH_MAX} coins. Remove one first.` });
+      bot.watchTokens = [...list, mint];
+      await saveDb();
+      log('info', `${bot.name} is watching ${mint} and will buy it on a breakout.`);
+    }
+    res.json(publicBot(bot));
+  } catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+});
+app.delete('/api/bots/:id/watch/:mint', requireAdmin, async (req, res) => {
+  const bot = db.bots.find(b => b.id === req.params.id);
+  if (!bot) return res.status(404).json({ error: 'Bot not found.' });
+  bot.watchTokens = (bot.watchTokens || []).filter(m => m !== req.params.mint);
+  await saveDb();
+  res.json(publicBot(bot));
 });
 app.post('/api/bots/:id/withdraw', requireAdmin, async (req, res) => {
   try {

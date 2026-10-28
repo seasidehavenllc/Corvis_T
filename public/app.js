@@ -78,8 +78,12 @@ function render() {
   renderBots(); renderPositions(); renderTrades(); renderSide(); renderJournal(); renderSmartWallets();
 }
 
+// What was typed in each bot's token box, kept across the 10-second refresh.
+const tokenDrafts = {};
 function renderBots() {
   const bots = state.overview.bots;
+  // Don't redraw under someone typing a token address; the next refresh catches up.
+  if (document.activeElement?.closest?.('#bots .token-box')) return;
   if (!bots.length) { $('#bots').innerHTML = '<div class="empty">No bots yet. Click <b>+ New bot</b> to create one. It starts in paper mode.</div>'; return; }
   $('#bots').innerHTML = bots.map(b => {
     const p = b.perf || {};
@@ -112,6 +116,17 @@ function renderBots() {
         ${b.followWallets?.length || b.autoFollow ? `<span class="chip">copying ${b.followWallets?.length ? `${b.followWallets.length} wallet${b.followWallets.length > 1 ? 's' : ''}` : ''}${b.followWallets?.length && b.autoFollow ? ' + ' : ''}${b.autoFollow ? 'auto-found wallets' : ''}${b.followOnly ? ' only' : ''}</span>` : ''}
         ${b.trailingStopPercent ? `<span class="chip">trail ${esc(b.trailingStopPercent)}%</span>` : ''}
         ${b.insiderSellPct > 0 || b.maxSingleHolderPct > 0 ? `<span class="chip">rug guard${b.maxSingleHolderPct > 0 ? ` · 1 wallet ≤ ${esc(b.maxSingleHolderPct)}%` : ''}${b.insiderSellPct > 0 ? ` · sell if insiders dump ${esc(b.insiderSellPct)}%` : ''}</span>` : '<span class="chip">rug guard off</span>'}
+      </div>
+      <div class="token-box">
+        <div class="token-row">
+          <input class="mono" data-token="mint" data-id="${esc(b.id)}" placeholder="Token address" value="${esc(tokenDrafts[b.id]?.mint || '')}" autocomplete="off" spellcheck="false">
+          <input data-token="amount" data-id="${esc(b.id)}" type="number" min="0" step="0.01" title="SOL to spend on Buy now" value="${esc(tokenDrafts[b.id]?.amount ?? b.maxPositionSol)}">
+        </div>
+        <div class="token-row">
+          <button class="btn btn-start btn-sm" data-act="buytoken" data-id="${esc(b.id)}" title="Buy this coin now for the SOL amount; the bot's sell rules take over">Buy now</button>
+          <button class="btn btn-sm" data-act="watchtoken" data-id="${esc(b.id)}" title="Track this coin and buy it (for the bot's trade size) the moment it breaks out">Watch</button>
+        </div>
+        ${b.watchTokens?.length ? `<div class="chips">${b.watchTokens.map(m => `<span class="chip" title="${esc(m)}">👀 ${esc(short(m))} <button class="chip-x" data-act="unwatch" data-id="${esc(b.id)}" data-mint="${esc(m)}" aria-label="Stop watching">×</button></span>`).join('')}${b.enabled ? '' : '<span class="chip">start the bot to buy watched coins</span>'}</div>` : ''}
       </div>
       <div class="bot-actions">
         ${b.enabled ? `<button class="btn btn-stop btn-sm" data-act="pause" data-id="${esc(b.id)}">Pause</button>` : `<button class="btn btn-start btn-sm" data-act="start" data-id="${esc(b.id)}">Start</button>`}
@@ -285,6 +300,10 @@ $('#botForm').addEventListener('submit', async e => {
 
 // ---------- bot actions ----------
 const botById = id => state.overview.bots.find(b => b.id === id);
+document.addEventListener('input', e => {
+  const field = e.target.closest?.('[data-token]');
+  if (field) (tokenDrafts[field.dataset.id] ||= {})[field.dataset.token] = field.value;
+});
 document.addEventListener('click', async e => {
   const copy = e.target.closest('[data-copy]');
   if (copy) { try { await navigator.clipboard.writeText(copy.dataset.copy); toast('Address copied'); } catch { prompt('Copy address', copy.dataset.copy); } return; }
@@ -303,6 +322,28 @@ document.addEventListener('click', async e => {
     if (act.dataset.act === 'withdraw') return openDetails(bot.id, { withdraw: true });
     if (act.dataset.act === 'edit') return openBotForm(bot);
     if (!requireUnlock()) return;
+    if (act.dataset.act === 'buytoken' || act.dataset.act === 'watchtoken') {
+      const mint = (tokenDrafts[bot.id]?.mint || '').trim();
+      if (!mint) return toast('Paste a token address first.', true);
+      if (act.dataset.act === 'watchtoken') {
+        await post(`/api/bots/${encodeURIComponent(bot.id)}/watch`, { mint });
+        toast(`${bot.name} is watching ${short(mint)}. It buys ${bot.maxPositionSol} SOL when the price breaks out${bot.enabled ? '' : ' (start the bot first)'}.`);
+      } else {
+        const amountSol = Number(tokenDrafts[bot.id]?.amount ?? bot.maxPositionSol);
+        if (!(amountSol > 0)) return toast('Enter a SOL amount.', true);
+        if (!confirm(`${bot.mode === 'live' ? 'LIVE: spend real SOL. ' : ''}Buy ${amountSol} SOL of ${short(mint)} with ${bot.name} now?\n\nThe bot's take profit, stop loss and rug guard will sell it.`)) return;
+        act.disabled = true;
+        try { const r = await post(`/api/bots/${encodeURIComponent(bot.id)}/buy`, { mint, amountSol }); toast(`${bot.name} bought ${r.symbol} for ${r.sizeSol.toFixed(4)} SOL.`); }
+        finally { act.disabled = false; }
+      }
+      delete tokenDrafts[bot.id];
+      return refresh();
+    }
+    if (act.dataset.act === 'unwatch') {
+      await api(`/api/bots/${encodeURIComponent(bot.id)}/watch/${encodeURIComponent(act.dataset.mint)}`, { method: 'DELETE' });
+      toast('Stopped watching that coin.');
+      return refresh();
+    }
     if (act.dataset.act === 'mode') {
       const mode = act.dataset.mode;
       if (mode === bot.mode) return;
