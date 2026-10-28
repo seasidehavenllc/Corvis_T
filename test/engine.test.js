@@ -347,7 +347,7 @@ test('default filters skip brand-new launches, thin pools and pools losing liqui
   const ok = pair({ pairCreatedAt: now - 10 * 60_000, liquidity: { usd: 20000 }, holders: 250, topHoldersPct: 20, devPct: 1 });
   assert.deepEqual(passesFilters(ok, d, now), []);
   assert.ok(passesFilters({ ...ok, pairCreatedAt: now - 30_000 }, d, now).includes('too_new'));
-  assert.ok(passesFilters({ ...ok, liquidity: { usd: 1500 } }, d, now).includes('liquidity'));
+  assert.ok(passesFilters({ ...ok, liquidity: { usd: 2000 } }, d, now).includes('liquidity'));
   assert.ok(passesFilters({ ...ok, liquidityChange5m: -25 }, d, now).includes('liquidity_falling'));
   assert.ok(passesFilters({ ...ok, holders: 30 }, d, now).includes('holders'));
 });
