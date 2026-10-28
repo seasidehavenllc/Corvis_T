@@ -74,6 +74,10 @@ function render() {
   $('#kTrades').textContent = `${t.trades} trades`;
   $('#kOpen').textContent = o.positions.length;
   $('#kEngine').textContent = o.engine?.lastTickAt ? `engine scanned ${ago(o.engine.lastTickAt)} ago · ${o.engine.candidates} candidates` : 'engine starting…';
+  // Why coins were skipped in the last minute, biggest reasons first, so a quiet bot explains itself.
+  const skips = Object.entries(o.engine?.skips || {}).sort((a, b) => b[1] - a[1]);
+  $('#kEngine').title = skips.length ? `Skipped in the last minute: ${skips.map(([k, n]) => `${k.replace(/_/g, ' ')} ${n}`).join(', ')}` : '';
+  if (skips.length) $('#kEngine').textContent += ` · top skips: ${skips.slice(0, 3).map(([k, n]) => `${k.replace(/_/g, ' ')} ${n}`).join(', ')}`;
 
   renderBots(); renderPositions(); renderTrades(); renderSide(); renderJournal(); renderSmartWallets();
 }
@@ -210,7 +214,13 @@ const gain = m => `+${+((m - 1) * 100).toFixed(1)}%`;
 // A stop or profit floor that sold well below its own level: the price fell through it between two checks.
 const gapped = t => ['stop_loss', 'trailing_stop', 'protect_profit'].includes(t.reason) && t.entrySol > 0 && t.pnlSol / t.entrySol <= -0.3;
 const REASONS = { take_profit: 'take profit', stop_loss: 'stop loss', trailing_stop: 'trailing stop', max_hold: 'time limit', protect_profit: 'profit floor', unsellable: 'unsellable', manual: 'sold by you', rug_warning: 'rug warning', leader_sold: 'copied wallet sold' };
-const defaults = { name: '', mode: 'paper', takeProfitMultiplier: 1.5, stopLossPercent: 12, stopLossFollowsPrice: true, maxHoldMinutes: 30, maxPositionSol: 0.05, maxOpenPositions: 3, maxDailyLossSol: 0.2, minLiquidityUsd: 15000, maxPairAgeMinutes: 120, minBuys5m: 30, slippageBps: 500, trailingStopPercent: 12, minBuySellRatio: 1.5, priorityFeeSol: 0.0003, maxPriceImpactPct: 4, maxRoundTripPct: 3, minHolders: 250, maxTopHoldersPct: 30, partialTakeProfitMultiplier: 1.15, partialSellPercent: 50, maxDevHoldingPct: 5, maxDevLaunches: 10, minOrganicScore: 0, minPairAgeMinutes: 10, maxSingleHolderPct: 10, insiderSellPct: 5, maxLiquidityPerHolderUsd: 100, requireHolderData: true, breakoutPct: 15 };
+// Strategy presets the form can load. Sniper is the default: fresh launches bought as soon as they pass
+// the rug checks, scalped fast. Breakout waits for older coins that are already climbing.
+const PRESETS = {
+  sniper: { takeProfitMultiplier: 1.3, stopLossPercent: 10, stopLossFollowsPrice: true, maxHoldMinutes: 10, maxOpenPositions: 5, minLiquidityUsd: 3000, maxPairAgeMinutes: 30, minBuys5m: 15, trailingStopPercent: 8, minBuySellRatio: 1.3, priorityFeeSol: 0.0001, minHolders: 50, partialTakeProfitMultiplier: 1.12, partialSellPercent: 50, maxDevLaunches: 30, minPairAgeMinutes: 1, insiderSellPct: 8, breakoutPct: 0 },
+  breakout: { takeProfitMultiplier: 1.5, stopLossPercent: 12, stopLossFollowsPrice: true, maxHoldMinutes: 30, maxOpenPositions: 3, minLiquidityUsd: 15000, maxPairAgeMinutes: 120, minBuys5m: 30, trailingStopPercent: 12, minBuySellRatio: 1.5, priorityFeeSol: 0.0001, minHolders: 250, partialTakeProfitMultiplier: 1.15, partialSellPercent: 50, maxDevLaunches: 10, minPairAgeMinutes: 10, insiderSellPct: 5, breakoutPct: 15 }
+};
+const defaults = { name: '', mode: 'paper', maxPositionSol: 0.05, maxDailyLossSol: 0.2, slippageBps: 500, maxPriceImpactPct: 4, maxRoundTripPct: 3, maxTopHoldersPct: 30, maxDevHoldingPct: 5, minOrganicScore: 0, maxSingleHolderPct: 10, maxLiquidityPerHolderUsd: 100, requireHolderData: true, ...PRESETS.sniper };
 function requireUnlock() { if (adminToken) return true; $('#unlockDialog').showModal(); return false; }
 function openBotForm(bot) {
   if (!requireUnlock()) return;
@@ -264,6 +274,16 @@ $('#fMax').addEventListener('input', feeHint);
 $('#fPrio').addEventListener('input', feeHint);
 $('#newBot').addEventListener('click', () => openBotForm(null));
 $('#botClose').addEventListener('click', () => $('#botDialog').close());
+// Load a preset's strategy into the form; size, mode, name and wallets stay as they are.
+document.addEventListener('click', e => {
+  const btn = e.target.closest('[data-preset]');
+  if (!btn) return;
+  const preset = PRESETS[btn.dataset.preset];
+  for (const [id, key] of Object.entries(fields)) if (key in preset) $(`#${id}`).value = GAIN_FIELDS.has(id) ? +((preset[key] - 1) * 100).toFixed(2) : preset[key];
+  $('#fSlFollow').checked = preset.stopLossFollowsPrice;
+  feeHint();
+  toast(`${btn.textContent} settings loaded. Save to apply.`);
+});
 // Errors are shown inside the dialog: a toast would sit behind the open dialog where it can't be seen.
 function botError(msg, field) {
   $('#botError').textContent = msg || '';
