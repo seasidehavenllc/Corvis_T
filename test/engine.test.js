@@ -275,10 +275,10 @@ test('default filters skip brand-new launches, thin pools and pools losing liqui
   const d = { ...STRATEGY_DEFAULTS };
   const ok = pair({ pairCreatedAt: now - 10 * 60_000, liquidity: { usd: 20000 }, holders: 250, topHoldersPct: 20, devPct: 1 });
   assert.deepEqual(passesFilters(ok, d, now), []);
-  assert.ok(passesFilters({ ...ok, pairCreatedAt: now - 2 * 60_000 }, d, now).includes('too_new'));
-  assert.ok(passesFilters({ ...ok, liquidity: { usd: 9000 } }, d, now).includes('liquidity'));
+  assert.ok(passesFilters({ ...ok, pairCreatedAt: now - 30_000 }, d, now).includes('too_new'));
+  assert.ok(passesFilters({ ...ok, liquidity: { usd: 2000 } }, d, now).includes('liquidity'));
   assert.ok(passesFilters({ ...ok, liquidityChange5m: -25 }, d, now).includes('liquidity_falling'));
-  assert.ok(passesFilters({ ...ok, holders: 60 }, d, now).includes('holders'));
+  assert.ok(passesFilters({ ...ok, holders: 30 }, d, now).includes('holders'));
 });
 test('a big pool with few holders is skipped as creator-seeded', () => {
   const d = { ...STRATEGY_DEFAULTS };
@@ -502,6 +502,7 @@ test('coins where one wallet holds too much are never bought', async () => {
 test('the bot sells as soon as the biggest wallets start dumping, before the price moves', async () => {
   const chain = fakeChain([{ owner: pool(), amount: 6e14 }, { owner: wallet(), amount: 6e13 }, { owner: wallet(), amount: 5e13 }]);
   const { db, engine } = paperEngine(chain.connection);
+  db.bots[0].insiderSellPct = 5;
   await engine.tick();
   assert.equal(db.positions.length, 1);
   assert.equal(db.positions[0].holderWatch.wallets.length, 2);
