@@ -179,6 +179,15 @@ async function recoverWallets() {
 function requirePublicKey(value, label = 'address') {
   try { return new PublicKey(value); } catch { throw new Error(`Invalid Solana ${label}.`); }
 }
+// A coin address out of whatever was pasted: phone keyboards and copy buttons can add spaces or
+// invisible characters, and people paste pump.fun or Jupiter links. The first run of base58 that is a
+// valid address wins.
+function tokenAddress(value) {
+  for (const run of String(value || '').match(/[1-9A-HJ-NP-Za-km-z]{32,44}/g) || []) {
+    try { return new PublicKey(run).toBase58(); } catch { /* try the next one */ }
+  }
+  throw new Error('Invalid Solana token address. Paste the coin\'s contract address (CA).');
+}
 function getDevWallet() { return requirePublicKey(DEV_WALLET_ADDRESS, 'dev wallet address'); }
 // Solana refuses transfers that would leave either wallet holding SOL but less than the rent-exempt
 // minimum (about 0.00089 SOL), so those are rejected here with a clear message instead.
@@ -425,7 +434,7 @@ app.post('/api/bots/:id/buy', requireAdmin, async (req, res) => {
   if (!bot) return res.status(404).json({ error: 'Bot not found.' });
   try {
     let mint;
-    try { mint = requirePublicKey(String(req.body?.mint || '').trim(), 'token address').toBase58(); }
+    try { mint = tokenAddress(req.body?.mint); }
     catch (e) { return res.status(400).json({ error: e.message }); }
     const amountSol = Number(req.body?.amountSol);
     if (!(Number.isFinite(amountSol) && amountSol > 0 && amountSol <= 100)) return res.status(400).json({ error: 'Enter a SOL amount between 0 and 100.' });
@@ -440,7 +449,7 @@ app.post('/api/bots/:id/watch', requireAdmin, async (req, res) => {
   const bot = db.bots.find(b => b.id === req.params.id);
   if (!bot) return res.status(404).json({ error: 'Bot not found.' });
   try {
-    const mint = requirePublicKey(String(req.body?.mint || '').trim(), 'token address').toBase58();
+    const mint = tokenAddress(req.body?.mint);
     const list = bot.watchTokens || [];
     if (!list.includes(mint)) {
       if (list.length >= WATCH_MAX) return res.status(400).json({ error: `A bot can watch up to ${WATCH_MAX} coins. Remove one first.` });

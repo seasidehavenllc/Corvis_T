@@ -119,7 +119,7 @@ function renderBots() {
       </div>
       <div class="token-box">
         <div class="token-row">
-          <input class="mono" data-token="mint" data-id="${esc(b.id)}" placeholder="Token address" value="${esc(tokenDrafts[b.id]?.mint || '')}" autocomplete="off" spellcheck="false">
+          <input class="mono" data-token="mint" data-id="${esc(b.id)}" placeholder="Token address (CA)" value="${esc(tokenDrafts[b.id]?.mint || '')}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
           <input data-token="amount" data-id="${esc(b.id)}" type="number" min="0" step="0.01" title="SOL to spend on Buy now" value="${esc(tokenDrafts[b.id]?.amount ?? b.maxPositionSol)}">
         </div>
         <div class="token-row">
