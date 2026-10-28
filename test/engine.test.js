@@ -367,6 +367,38 @@ test('a breakout bot keeps watching a coin and buys once it starts climbing', as
   assert.ok(db.positions[0].features.breakoutRisePct >= 15);
 });
 
+test('buy now: a pasted coin is bought for the chosen amount, even while the bot is paused', async () => {
+  const quote = url => { const u = new URL(url); const amt = Number(u.searchParams.get('amount')); return { outAmount: String(Math.floor(u.searchParams.get('inputMint') === SOL_MINT ? amt / 1e9 / 0.001 * 1e6 : amt / 1e6 * 0.001 * 1e9)) }; };
+  const fetchImpl = async url => ({ ok: true, json: async () => url.includes('/quote') ? quote(url) : url.includes('dexscreener.com/tokens') ? [pair({ pairCreatedAt: Date.now() - 5 * 3600_000 })] : [] });
+  const connection = { getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null, decimals: 6 } } } } }) };
+  const db = { bots: [{ ...bot, enabled: false, maxSingleHolderPct: 0, insiderSellPct: 0, paperBalanceSol: 1, watchTokens: [MINT], stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl });
+  const position = await engine.buyToken(db.bots[0], MINT, 0.3);
+  assert.equal(db.positions.length, 1, 'bought although the coin is too old for the entry filters');
+  assert.ok(Math.abs(position.sizeSol - 0.3) < 0.001);
+  assert.ok(db.bots[0].paperBalanceSol < 0.71);
+  assert.ok(position.features.manual);
+  assert.deepEqual(db.bots[0].watchTokens, [], 'no longer watched once bought');
+  await assert.rejects(engine.buyToken(db.bots[0], MINT, 0.1), /already holds/);
+  await assert.rejects(engine.buyToken(db.bots[0], Keypair.generate().publicKey.toBase58(), 0.1), /no price found/);
+});
+
+test('watch: a pasted coin is tracked and bought on its breakout', async () => {
+  let t = Date.now(), price = 0.001;
+  const quote = url => { const u = new URL(url); const amt = Number(u.searchParams.get('amount')); return { outAmount: String(Math.floor(u.searchParams.get('inputMint') === SOL_MINT ? amt / 1e9 / price * 1e6 : amt / 1e6 * price * 1e9)) }; };
+  // Not in any launch feed, and three hours old: only the watch list brings it in.
+  const fetchImpl = async url => ({ ok: true, json: async () => url.includes('/quote') ? quote(url) : url.includes('dexscreener.com/tokens') ? [pair({ pairCreatedAt: t - 3 * 3600_000, priceNative: String(price) })] : [] });
+  const connection = { getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null, decimals: 6 } } } } }) };
+  const db = { bots: [{ ...bot, followOnly: true, maxSingleHolderPct: 0, insiderSellPct: 0, paperBalanceSol: 1, watchTokens: [MINT], stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => t });
+  for (const p of [0.001, 0.001, 0.001, 0.001]) { price = p; await engine.scan(); t += 30_000; }
+  assert.equal(db.positions.length, 0, 'flat: keeps watching, even with breakouts off on the bot');
+  for (const p of [0.00105, 0.0011, 0.0012]) { price = p; await engine.scan(); t += 30_000; }
+  assert.equal(db.positions.length, 1, 'bought on the climb');
+  assert.ok(db.positions[0].features.watched);
+  assert.deepEqual(db.bots[0].watchTokens, []);
+});
+
 test('a coin name launched on more than one mint is skipped as a copycat', async () => {
   const other = Keypair.generate().publicKey.toBase58();
   const quote = url => { const u = new URL(url); const amt = Number(u.searchParams.get('amount')); return { outAmount: String(Math.floor(u.searchParams.get('inputMint') === SOL_MINT ? amt / 1e9 / 0.001 * 1e6 : amt / 1e6 * 0.001 * 1e9)) }; };

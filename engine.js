@@ -56,6 +56,8 @@ export const MAX_FOLLOWED = 10;
 // the last COPYCAT_MS is skipped.
 const COPYCAT_MS = 2 * 60 * 60 * 1000;
 const FOLLOW_IGNORES = new Set(['age', 'too_new', 'buys', 'momentum', 'holders', 'organic', 'seeded_pool', 'unknown_holders']);
+const WATCH_BREAKOUT_PCT = 15; // rise a hand-watched coin needs when its bot has no breakout setting
+export const WATCH_MAX = 20; // coins each bot can watch by hand
 const HOLDER_LOOKUP_MS = 2 * 60_000; // a coin's holder count looked up from Jupiter is reused this long
 // Finding wallets to copy: a coin that has run this far since the bot first saw it is checked for the
 // wallets that bought early and sold for a profit; those wallets are then graded on their whole recent record.
@@ -474,6 +476,8 @@ export function createEngine({
   async function discover(now) {
     for (const [mint, at] of watch) if (now - at > SEEN_TTL_MS) watch.delete(mint);
     const add = mint => { if (mint && !watch.has(mint)) watch.set(mint, now); };
+    // Coins someone asked a bot to watch stay on the list (moved to the newest end so they are never evicted).
+    for (const b of db.bots) for (const m of b.watchTokens || []) { watch.delete(m); watch.set(m, now); }
     const pairs = new Map();
     const keep = pair => {
       if (!pair) return;
@@ -742,17 +746,18 @@ export function createEngine({
   }
 
   const lowBalanceLoggedAt = new Map(); // bot id -> last time the low-balance warning was logged
-  async function openPosition(bot, pair) {
+  // sizeSol: what to spend, the bot's trade size unless chosen by hand. A manual buy goes ahead while the bot is paused.
+  async function openPosition(bot, pair, sizeSol = bot.maxPositionSol, { manual = false } = {}) {
     const price = Number(pair.priceNative);
-    if (!(price > 0) || !(bot.maxPositionSol > 0)) return null;
+    if (!(price > 0) || !(sizeSol > 0)) return null;
     const now = clock();
     const position = {
       id: randomUUID(), botId: bot.id, mode: bot.mode, mint: pair.baseToken.address,
       symbol: pair.baseToken.symbol || '?', pairUrl: pair.url || null, entryPrice: price,
-      lastPrice: price, sizeSol: bot.maxPositionSol, openedAt: iso()
+      lastPrice: price, sizeSol, openedAt: iso()
     };
     const fee = TX_FEE_SOL + (bot.priorityFeeSol || 0);
-    const lamports = Math.floor(bot.maxPositionSol * LAMPORTS_PER_SOL);
+    const lamports = Math.floor(sizeSol * LAMPORTS_PER_SOL);
     let owner, before;
     if (bot.mode === 'live') {
       if (!liveAllowed) return null;
@@ -761,11 +766,15 @@ export function createEngine({
       if (before < lamports + 0.01 * LAMPORTS_PER_SOL) {
         if (now - (lowBalanceLoggedAt.get(bot.id) || 0) >= 60_000) {
           lowBalanceLoggedAt.set(bot.id, now);
-          log('warn', `${bot.name}: wallet balance too low for a ${bot.maxPositionSol} SOL buy (needs ${(bot.maxPositionSol + 0.01).toFixed(3)} SOL: the buy plus 0.01 SOL kept for fees and account deposits).`);
+          log('warn', `${bot.name}: wallet balance too low for a ${sizeSol} SOL buy (needs ${(sizeSol + 0.01).toFixed(3)} SOL: the buy plus 0.01 SOL kept for fees and account deposits).`);
         }
+        if (manual) throw new Error(`wallet balance too low for a ${sizeSol} SOL buy (needs ${(sizeSol + 0.01).toFixed(3)} SOL with fees)`);
         return null;
       }
-    } else if (bot.paperBalanceSol < bot.maxPositionSol + fee) return null;
+    } else if (bot.paperBalanceSol < sizeSol + fee) {
+      if (manual) throw new Error(`paper balance too low for a ${sizeSol} SOL buy`);
+      return null;
+    }
 
     // One wallet holding a big slice of the supply can crash the price with a single sell, so skip those.
     // The biggest wallets are kept on the position and watched while it is open.
@@ -783,7 +792,7 @@ export function createEngine({
     const backQuote = await jupiterQuote(position.mint, SOL_MINT, buyQuote.outAmount, bot);
     const roundTripPct = (1 - Number(backQuote.outAmount) / lamports) * 100;
     if (bot.maxRoundTripPct > 0 && roundTripPct > bot.maxRoundTripPct) throw new Error(`buying and selling back would cost ${roundTripPct.toFixed(1)}% (limit ${bot.maxRoundTripPct}%)`);
-    if (!bot.enabled) return null; // paused while quoting
+    if (!bot.enabled && !manual) return null; // paused while quoting
 
     if (bot.mode === 'live') {
       const { signature } = await jupiterSwap(owner, SOL_MINT, position.mint, lamports, bot, { buying: true, quote: buyQuote });
@@ -798,7 +807,7 @@ export function createEngine({
       // Paper fills use real Jupiter quotes plus network and priority fees, so paper results match
       // what the same trade would have done live.
       position.tokenRaw = buyQuote.outAmount;
-      position.sizeSol = bot.maxPositionSol + fee;
+      position.sizeSol = sizeSol + fee;
       bot.paperBalanceSol -= position.sizeSol;
     }
     position.tokens = Number(position.tokenRaw) / 10 ** (decimals.get(position.mint) ?? 6);
@@ -811,7 +820,7 @@ export function createEngine({
       roundTripPct, priceImpactPct: Number(buyQuote.priceImpactPct || 0) * 100,
       ...Object.fromEntries(AUDIT_KEYS.filter(k => k !== 'isSus').map(k => [k, pair[k] ?? null])),
       topWalletPct: holders?.wallets[0]?.pct ?? null, creatorPct: holders?.wallets.find(w => w.dev)?.pct ?? null,
-      breakoutRisePct: pair.breakoutRisePct ?? null
+      breakoutRisePct: pair.breakoutRisePct ?? null, ...(manual ? { manual: true } : {}), ...(pair.watched ? { watched: true } : {})
     };
     const spot = (await pricesFor([position.mint]).catch(() => new Map())).get(position.mint);
     if (spot > 0) position.entryPrice = position.lastPrice = spot;
@@ -820,6 +829,32 @@ export function createEngine({
     position.peakMultiple = position.multiple;
     db.positions.push(position);
     log('info', `${bot.name} bought ${position.symbol} (${position.mint}) for ${position.sizeSol.toFixed(4)} SOL (${bot.mode}); worth ${position.valueSol.toFixed(4)} SOL if sold now. Entry: ${JSON.stringify(position.features)}`);
+    return position;
+  }
+
+  // A coin's current pair by its address: Jupiter's token search first, then DexScreener.
+  async function lookupPair(mint) {
+    if (!solUsd) await pricesFor([]);
+    if (solUsd) {
+      const token = (await feedJson(`${JUPITER_TOKENS}/search?query=${mint}`, 30_000).catch(() => []) || []).find(t => t?.id === mint);
+      const pair = token && jupiterPair(token);
+      if (pair) return pair;
+    }
+    return (await dexPairs([mint])).get(mint) || null;
+  }
+
+  // Buy a coin by hand: the address someone pasted, for the SOL amount they chose. The bot's sell rules
+  // manage it from there. The sell-back, price impact and whale checks still apply; the entry filters don't.
+  async function buyToken(bot, mint, sizeSol) {
+    if (db.positions.some(p => p.botId === bot.id && p.mint === mint)) throw new Error('this bot already holds that coin');
+    if (bot.mode === 'live' && !liveAllowed) throw new Error('live trading is switched off on the server');
+    const pair = await lookupPair(mint);
+    if (!pair) throw new Error('no price found for that coin (no Jupiter or DexScreener pool)');
+    if (!(await mintIsSafe(mint).catch(() => false))) throw new Error('its creator can still mint more coins or freeze wallets');
+    const position = await withWallet(bot, () => openPosition(bot, pair, sizeSol, { manual: true }));
+    if (!position) throw new Error('the buy did not go through');
+    bot.watchTokens = (bot.watchTokens || []).filter(m => m !== mint);
+    await save();
     return position;
   }
 
@@ -1221,28 +1256,37 @@ export function createEngine({
         // Coins a wallet this bot follows just bought come first; a follow-only bot buys nothing else.
         const follows = new Set(followedBy(bot));
         const leaderOf = mint => { const sig = signals.get(mint); return sig && follows.has(sig.wallet) ? sig.wallet : null; };
-        const mine = ordered.filter(([m]) => leaderOf(m));
-        for (const [mint, pair] of bot.followOnly ? mine : [...mine, ...ordered.filter(([m]) => !leaderOf(m))]) {
+        // Coins added to the bot's watch list by hand come next; a follow-only bot buys those too.
+        const watched = new Set(bot.watchTokens || []);
+        const mine = ordered.filter(([m]) => leaderOf(m) || watched.has(m));
+        for (const [mint, pair] of bot.followOnly ? mine : [...mine, ...ordered.filter(([m]) => !leaderOf(m) && !watched.has(m))]) {
           if (!bot.enabled || db.positions.filter(p => p.botId === bot.id).length >= bot.maxOpenPositions) break;
           if (db.positions.some(p => p.botId === bot.id && p.mint === mint)) continue;
-          if (db.trades.some(t => t.botId === bot.id && t.mint === mint)) continue;
+          const leader = leaderOf(mint), picked = watched.has(mint);
+          if (!picked && db.trades.some(t => t.botId === bot.id && t.mint === mint)) continue;
           if ((rejected.get(mint) || 0) > now) continue;
-          const leader = leaderOf(mint);
-          let failed = passesFilters(pair, bot, now).filter(r => !leader || !FOLLOW_IGNORES.has(r));
-          if (failed.length === 1 && failed[0] === 'unknown_holders' && await addHolderData(mint, pair, now)) failed = passesFilters(pair, bot, now).filter(r => !leader || !FOLLOW_IGNORES.has(r));
-          if (!failed.length && !leader && (nameMints.get(String(pair.baseToken?.symbol || '').trim().toUpperCase())?.size || 0) > 1) failed.push('copycat');
+          // A coin chosen by hand or bought by a followed wallet skips the launch filters (age, buys, holders...)
+          // but not the rug checks.
+          const vouched = leader || picked;
+          let failed = passesFilters(pair, bot, now).filter(r => !vouched || !FOLLOW_IGNORES.has(r));
+          if (failed.length === 1 && failed[0] === 'unknown_holders' && await addHolderData(mint, pair, now)) failed = passesFilters(pair, bot, now).filter(r => !vouched || !FOLLOW_IGNORES.has(r));
+          if (!failed.length && !vouched && (nameMints.get(String(pair.baseToken?.symbol || '').trim().toUpperCase())?.size || 0) > 1) failed.push('copycat');
           if (failed.length) { skips[failed[0]] = (skips[failed[0]] || 0) + 1; continue; }
           // Breakout bots keep watching a coin that passes the filters and buy once it starts climbing.
-          if (bot.breakoutPct > 0 && !leader) {
-            const rise = breakoutRise(priceHistory.get(mint), now, bot.breakoutPct);
+          // A watched coin always waits for a breakout (15% unless the bot sets its own).
+          const breakout = picked ? bot.breakoutPct || WATCH_BREAKOUT_PCT : leader ? 0 : bot.breakoutPct;
+          if (breakout > 0) {
+            const rise = breakoutRise(priceHistory.get(mint), now, breakout);
             if (rise == null) { skips.waiting_breakout = (skips.waiting_breakout || 0) + 1; continue; }
             pair.breakoutRisePct = rise;
           }
+          if (picked) pair.watched = true;
           if (!(await mintIsSafe(mint).catch(() => false))) { skips.mint_authority = (skips.mint_authority || 0) + 1; continue; }
           try {
             const position = await withWallet(bot, () => openPosition(bot, pair));
             if (position) {
               bought = true;
+              if (picked) { bot.watchTokens = bot.watchTokens.filter(m => m !== mint); log('info', `${bot.name} bought watched coin ${position.symbol} on a ${pair.breakoutRisePct.toFixed(1)}% breakout.`); }
               if (leader) { position.leader = leader; position.features.copied = true; log('info', `${bot.name} copied ${leader.slice(0, 4)}…${leader.slice(-4)} into ${position.symbol}.`); }
             }
           }
@@ -1317,6 +1361,7 @@ export function createEngine({
       tick();
     },
     stop() { timers.splice(0).forEach(clearInterval); },
+    buyToken: (bot, mint, sizeSol) => buyToken(bot, mint, sizeSol),
     tick, monitor, scan, watchLeaders: () => watchLeaders(clock()), scout: () => scout(clock()), gradeWallet, health, liveAllowed, jupiterSwap, estimateMultiple,
     adoptHoldings: (bot, mints) => withWallet(bot, () => adoptHoldings(bot, mints)),
     cleanupWallet: bot => withWallet(bot, () => cleanupWallet(bot)),
