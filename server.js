@@ -130,7 +130,7 @@ function newBotRecord(settings, walletIndex) {
 let recovery = { done: false, recovered: 0, error: null };
 // RECOVERED_BOT_SETTINGS (JSON, e.g. {"mode":"live","maxPositionSol":0.01,"maxOpenPositions":20}) is applied to
 // bots rebuilt after a restart, so on the free plan your settings come back instead of the defaults.
-// The bot still starts paused.
+// A paper bot starts running again by itself; a live bot starts paused.
 function applyRecoverySettings(bot) {
   if (!process.env.RECOVERED_BOT_SETTINGS) return;
   let parsed;
@@ -151,6 +151,8 @@ async function recoverWallets() {
       const bot = newBotRecord({ name: `Recovered wallet #${w.index + 1}` }, w.index);
       applyRecoverySettings(bot);
       bot.status = w.tokens ? `Paused · recovered, holds ${w.tokens} token(s)` : 'Paused · recovered';
+      // Paper bots spend nothing, so they pick up where they left off; live bots wait for someone to press Start.
+      if (bot.mode === 'paper') Object.assign(bot, { enabled: true, status: 'Running · paper' });
       db.bots.push(bot);
       recovery.recovered++;
       log('warn', `Recovered ${bot.name} (${w.lamports / LAMPORTS_PER_SOL} SOL, ${w.tokens} token account(s)). Its trade history was not saved.`);
