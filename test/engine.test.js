@@ -218,6 +218,36 @@ test('a winner is sold when its chart turns, before the stop', async () => {
   assert.ok(db.trades[0].peakMultiple > 1.3, 'peak is recorded');
   assert.ok(lines.some(l => /chart is turning down/.test(l)) && lines.some(l => /Peak \+\d+%/.test(l)));
 });
+test('a trade that never went up is also sold when its chart turns, before the stop', async () => {
+  let poolPrice = 0.001;
+  const quote = url => {
+    const u = new URL(url); const amt = Number(u.searchParams.get('amount'));
+    const out = u.searchParams.get('inputMint') === SOL_MINT ? amt / 1e9 / poolPrice * 1e6 : amt / 1e6 * poolPrice * 1e9;
+    return { outAmount: String(Math.floor(out)) };
+  };
+  const fetchImpl = async url => ({
+    ok: true,
+    json: async () => url.includes('/quote') ? quote(url) : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }]
+      : url.includes('token-boosts') ? [] : [pair({ priceNative: String(poolPrice), pairCreatedAt: Date.now() - 60_000 })]
+  });
+  const connection = { getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null } } } } }) };
+  const b = { ...bot, paperBalanceSol: 1, takeProfitMultiplier: 3, stopLossPercent: 40, trailingStopPercent: 0, stats: { ...bot.stats } };
+  const db = { bots: [b], trades: [], positions: [] };
+  let t = Date.now();
+  const lines = [];
+  const engine = createEngine({ db, save: async () => {}, log: (_, m) => lines.push(m), connection, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => t });
+  await engine.tick();
+  assert.equal(db.positions.length, 1);
+  for (let i = 0; i < 140 && !db.trades.length; i++) {
+    poolPrice *= i < 40 ? 1.0005 : 0.995; // flat, then sliding
+    t += 1_000;
+    await engine.monitor();
+  }
+  assert.equal(db.trades.length, 1);
+  assert.equal(db.trades[0].reason, 'crash_signal');
+  assert.ok(db.trades[0].pnlSol > -0.1 * 0.4, 'sold well before the 40% stop');
+  assert.ok(lines.some(l => /chart is turning down/.test(l)));
+});
 
 test('trade journal groups closed trades by entry signal', () => {
   const trades = [

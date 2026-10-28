@@ -20,8 +20,7 @@ export const JUPITER_HEADERS = JUP_KEY ? { 'x-api-key': JUP_KEY } : {};
 export const JUPITER_RPM = Number(process.env.JUPITER_RPM || (JUP_KEY ? 60 : 50));
 const TX_FEE_SOL = 0.000005;
 const LOCKED_FLOOR = 1.02; // whole-trade multiple kept once the first target is banked
-const CRASH_SIGNALS = 2; // chart signals that must agree before a winner is sold early
-const CRASH_ARM = 1.12; // a trade is watched for a turn once it has been up this much (or its first target banked)
+const CRASH_SIGNALS = 2; // chart signals that must agree before an open trade is sold early
 const TICK_WINDOW_MS = 3 * 60_000; // price ticks kept per open position for the chart signals
 const NO_ROUTE = 'No Jupiter route for this token: nobody can buy it right now (its pool is drained or moving). The bot keeps retrying.';
 const AUDIT_KEYS = ['holders', 'topHoldersPct', 'devPct', 'devMints', 'isSus', 'organicScore', 'traders5m', 'organicBuyers5m', 'bondingCurvePct', 'liquidityChange5m'];
@@ -306,9 +305,8 @@ export function exitReason(position, bot, multiple, now = Date.now()) {
   return null;
 }
 
-// Chart reading for a trade that is already up: the indicators chart traders use, run on the position's own
-// price ticks, so the rest of a winner is sold when the move turns rather than after a dump runs through the
-// stop. ticks: [{ at, price }] oldest first, covering the last few minutes. flow: DexScreener's 5-minute
+// Chart reading for an open trade: the indicators chart traders use, run on the position's own price ticks,
+// so it is sold when the move turns rather than after a dump runs through the stop. ticks: [{ at, price }] oldest first, covering the last few minutes. flow: DexScreener's 5-minute
 // buy and sell counts, when known. Returns the names of the signals that fired.
 export function crashSignals(ticks, flow = null) {
   const out = [];
@@ -1036,14 +1034,12 @@ export function createEngine({
     }
     const timeUp = now - Date.parse(position.openedAt) >= bot.maxHoldMinutes * 60_000;
     const est = estimateMultiple(position);
-    // Within 5% of take profit counts as a hint too, so a fast spike is confirmed and sold without waiting.
-    // Once a trade has been up, watch its chart and sell before a turn becomes a dump.
-    const armAt = bot.partialTakeProfitMultiplier > 1 ? bot.partialTakeProfitMultiplier : CRASH_ARM;
     // Highest value seen, quoted or estimated from the spot price; kept apart from the stop's peak, which only moves on quotes.
     position.peakSeen = Math.max(position.peakSeen || 0, position.peakMultiple || 0, est);
-    const armed = position.partialDone || position.peakSeen >= armAt;
-    const signals = armed ? crashSignals(ticks.get(position.mint) || [], flows.get(position.mint)) : [];
+    // Every open trade's chart is read the whole time, up or down, and sold the moment it turns.
+    const signals = crashSignals(ticks.get(position.mint) || [], flows.get(position.mint));
     const crash = signals.length >= CRASH_SIGNALS ? 'crash_signal' : null;
+    // Within 5% of take profit counts as a hint too, so a fast spike is confirmed and sold without waiting.
     const hint = exitReason(position, bot, est, now) || crash || (partialDue(position, bot, est) ? 'partial' : null) ||
       (est >= bot.takeProfitMultiplier * 0.95 ? 'near_target' : null);
     // Re-quote as often as the budget allows: about 40% of Jupiter requests go to checking open positions.
@@ -1069,7 +1065,7 @@ export function createEngine({
       return;
     }
     const reason = exitReason(position, bot, position.multiple, now) || crash;
-    if (reason === 'crash_signal') log('info', `${bot.name}: ${position.symbol} chart is turning down (${signals.join(', ').replace(/_/g, ' ')}). Selling the rest.`);
+    if (reason === 'crash_signal') log('info', `${bot.name}: ${position.symbol} chart is turning down (${signals.join(', ').replace(/_/g, ' ')}). Selling now.`);
     if (reason) await closePosition(bot, position, reason, { quote: position.mode === 'paper' ? quote : null });
     else if (partialDue(position, bot, position.multiple)) await sellPart(bot, position, now);
   }
