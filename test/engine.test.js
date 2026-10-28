@@ -340,6 +340,24 @@ test('holder count is looked up on Jupiter before buying a coin found on DexScre
   assert.equal((await scanWith(undefined)).db.positions.length, 0);
 });
 
+test('when Jupiter is busy, the holder count comes from GeckoTerminal', async () => {
+  const t = Date.now();
+  const fetchImpl = async url => {
+    if (url.includes('/tokens/v2/search')) return { ok: false, status: 503, text: async () => 'busy', json: async () => ({}) };
+    const body = url.includes('/price/v3') ? { [SOL_MINT]: { usdPrice: 150 } }
+      : url.includes(`/tokens/${MINT}/info`) ? { data: { attributes: { holders: { count: 640 } } } }
+      : url.includes('/quote') ? { outAmount: String(new URL(url).searchParams.get('inputMint') === SOL_MINT ? 1e8 : 9.95e7) }
+      : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }] : url.includes('token-boosts') ? [] : url.includes('dexscreener') ? [pair({ pairCreatedAt: t - 60_000, holders: undefined })] : [];
+    return { ok: true, json: async () => body };
+  };
+  const connection = { getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null, decimals: 6 } } } } }) };
+  const db = { bots: [{ ...bot, maxSingleHolderPct: 0, insiderSellPct: 0, paperBalanceSol: 1, stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl, clock: () => t });
+  await engine.scan();
+  assert.equal(db.positions.length, 1);
+  assert.equal(db.positions[0].features.holders, 640);
+});
+
 test('a breakout is a climb off the recent low that is still going up', () => {
   const t = 1_000_000;
   const series = prices => prices.map((price, i) => ({ at: t + i * 30_000, price }));

@@ -477,7 +477,7 @@ export function createEngine({
   // New launches come from Jupiter's recent-tokens and top organic lists, GeckoTerminal's newest pools and DexScreener's
   // latest profiles and boosts, whichever are answering. Tokens are watched for SEEN_TTL_MS and re-checked
   // every scan, so a launch that is too quiet at first can still be bought once it picks up.
-  let lastOrganicAt = 0, lastDexFeedAt = -Infinity;
+  let lastOrganicAt = 0, lastDexFeedAt = -Infinity, lastDexRefreshAt = -Infinity;
   const deadPools = new Map(); // mint -> when it was dropped for a pool too small; feeds listing it again don't re-add it
   async function discover(now) {
     const picked = new Set(db.bots.flatMap(b => b.watchTokens || []));
@@ -556,7 +556,11 @@ export function createEngine({
       }
       stale = stale.filter(m => !pairs.has(m));
     }
-    for (const [m, pair] of await dexPairs(stale)) pairs.set(m, pair);
+    // DexScreener fills what Jupiter couldn't, on the same 15 s rhythm: every scan got the server blocked.
+    if (stale.length && now - lastDexRefreshAt >= SEARCH_REFRESH_MS) {
+      lastDexRefreshAt = now;
+      for (const [m, pair] of await dexPairs(stale)) pairs.set(m, pair);
+    }
     health.sources = sources;
     health.jupiterBudget = `${Math.floor(bucket.tokens)}/${jupiterRpm} per min`;
     if (!Object.values(sources).includes('ok')) health.lastError = `No market feed answered: ${JSON.stringify(sources)}`;
@@ -1214,11 +1218,22 @@ export function createEngine({
     let hit = holderLookups.get(mint);
     if (!hit || now - hit.at > HOLDER_LOOKUP_MS) {
       if (!solUsd) return false;
+      let token = null, answered = false;
       try {
-        const token = (await feedJson(`${JUPITER_TOKENS}/search?query=${mint}`, 30_000) || []).find(t => t?.id === mint);
-        hit = { at: now, token: token ? jupiterPair(token) : null };
-        holderLookups.set(mint, hit);
-      } catch { return false; } // Jupiter busy or cooling down: try again next scan
+        const t = (await feedJson(`${JUPITER_TOKENS}/search?query=${mint}`, 30_000) || []).find(t => t?.id === mint);
+        token = t ? jupiterPair(t) : null;
+        answered = true;
+      } catch { /* Jupiter busy or cooling down: GeckoTerminal below */ }
+      // GeckoTerminal's token info also has a holder count, and it answers when Jupiter is rate-limited.
+      if (token?.holders == null) {
+        try {
+          const count = num((await feedJson(`${GECKOTERMINAL}/networks/solana/tokens/${mint}/info`, 60_000))?.data?.attributes?.holders?.count);
+          if (count != null) { token = { ...token, holders: count }; answered = true; }
+        } catch { /* try again next scan */ }
+      }
+      if (!answered) return false;
+      hit = { at: now, token };
+      holderLookups.set(mint, hit);
       for (const [m, h] of holderLookups) if (now - h.at > HOLDER_LOOKUP_MS) holderLookups.delete(m);
     }
     if (hit.token?.holders == null) return false;
@@ -1269,6 +1284,8 @@ export function createEngine({
         try { for (const t of await feedJson(`${JUPITER_TOKENS}/search?query=${copied.slice(0, 100).join(',')}`, 30_000) || []) { const p = jupiterPair(t); if (p) candidates.set(p.baseToken.address, p); } }
         catch { /* feeds cooling down; try next scan */ }
       }
+      const unpriced = [...signals.keys()].filter(m => !candidates.has(m));
+      if (unpriced.length) for (const [m, p] of await dexPairs(unpriced.slice(0, 30))) candidates.set(m, p);
       // Newest launches first.
       const ordered = [...candidates].sort((a, b) => (b[1].pairCreatedAt || 0) - (a[1].pairCreatedAt || 0));
       let bought = false;
