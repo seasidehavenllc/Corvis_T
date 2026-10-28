@@ -446,6 +446,13 @@ app.post('/api/bots/:id/buy', requireAdmin, async (req, res) => {
     res.status(e.status || 502).json({ error: `Buy failed: ${e.message}` });
   }
 });
+app.get('/api/token/:mint', requireAdmin, async (req, res) => {
+  try {
+    const info = await engine.tokenInfo(tokenAddress(req.params.mint));
+    if (!info) return res.status(404).json({ error: 'No price found for that coin (no Jupiter or DexScreener pool).' });
+    res.json(info);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
 app.post('/api/bots/:id/watch', requireAdmin, async (req, res) => {
   const bot = db.bots.find(b => b.id === req.params.id);
   if (!bot) return res.status(404).json({ error: 'Bot not found.' });
@@ -455,6 +462,8 @@ app.post('/api/bots/:id/watch', requireAdmin, async (req, res) => {
     if (!list.includes(mint)) {
       if (list.length >= WATCH_MAX) return res.status(400).json({ error: `A bot can watch up to ${WATCH_MAX} coins. Remove one first.` });
       bot.watchTokens = [...list, mint];
+      const info = await engine.tokenInfo(mint).catch(() => null);
+      if (info?.symbol && info.symbol !== '?') bot.watchNames = { ...bot.watchNames, [mint]: info.symbol };
       await saveDb();
       log('info', `${bot.name} is watching ${mint} and will buy it on a breakout.`);
     }
@@ -465,6 +474,7 @@ app.delete('/api/bots/:id/watch/:mint', requireAdmin, async (req, res) => {
   const bot = db.bots.find(b => b.id === req.params.id);
   if (!bot) return res.status(404).json({ error: 'Bot not found.' });
   bot.watchTokens = (bot.watchTokens || []).filter(m => m !== req.params.mint);
+  if (bot.watchNames) delete bot.watchNames[req.params.mint];
   await saveDb();
   res.json(publicBot(bot));
 });
