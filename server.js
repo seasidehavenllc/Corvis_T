@@ -357,10 +357,18 @@ app.get('/api/status', (_req, res) => res.json({
 }));
 app.get('/api/auth/check', requireAdmin, (_req, res) => res.json({ ok: true }));
 app.get('/api/bots', (_req, res) => res.json(db.bots.map(publicBot)));
+// The dashboard polls every 0.4 s, so wallet balances are read from the chain at most every 5 s and the
+// RPC budget stays with trading.
+let balanceCache = { at: 0, key: '', balances: new Map(), error: null };
 app.get('/api/overview', async (_req, res) => {
   const bots = db.bots.map(publicBot);
-  let balances = new Map(); let rpcError = null;
-  try { balances = await solBalances(bots.map(b => b.walletAddress)); } catch (e) { rpcError = `Unable to query Solana RPC: ${e.message}`; }
+  const key = bots.map(b => b.walletAddress).join();
+  if (Date.now() - balanceCache.at >= 5_000 || balanceCache.key !== key) {
+    balanceCache = { ...balanceCache, at: Date.now(), key };
+    try { balanceCache = { ...balanceCache, balances: await solBalances(bots.map(b => b.walletAddress)), error: null }; }
+    catch (e) { balanceCache = { ...balanceCache, error: `Unable to query Solana RPC: ${e.message}` }; }
+  }
+  const { balances, error: rpcError } = balanceCache;
   const withBalances = bots.map(b => ({ ...b, balanceSol: balances.has(b.walletAddress) ? balances.get(b.walletAddress) : null, perf: botPerformance(b.id), openPositions: db.positions.filter(p => p.botId === b.id).length }));
   const totals = withBalances.reduce((t, b) => ({
     balanceSol: t.balanceSol + (b.balanceSol || 0),

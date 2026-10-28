@@ -41,12 +41,25 @@ function spark(series, height = 40) {
   return `<svg class="spark" style="height:${height}px" viewBox="0 0 100 ${height}" preserveAspectRatio="none"><line x1="0" x2="100" y1="${zero}" y2="${zero}" stroke="var(--border)" stroke-dasharray="2 2" vector-effect="non-scaling-stroke"/><polyline fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke" points="${d}"/></svg>`;
 }
 
+// Bots, positions and the log refresh every 0.4 s, as fast as the bot checks its trades. The config, wallet
+// balance and journal (the wallet reads the chain) refresh every 10 s. The page is only redrawn when
+// something changed, and not while a button is held down, so clicks always land.
+let slowAt = 0, refreshing = false, pressing = false, shown = '';
+addEventListener('pointerdown', () => { pressing = true; });
+addEventListener('pointerup', () => setTimeout(() => { pressing = false; }, 300));
 async function refresh() {
+  if (refreshing || (document.hidden && slowAt)) return;
+  refreshing = true;
   try {
-    const [overview, config, events, wallet, journal] = await Promise.all([api('/api/overview'), api('/api/config'), api('/api/events'), api('/api/wallet').catch(() => null), api('/api/journal').catch(() => null)]);
-    state = { overview, config, events, wallet, journal };
-    render();
+    const slow = !slowAt || Date.now() - slowAt >= 10_000;
+    const [overview, events, more] = await Promise.all([api('/api/overview'), api('/api/events'),
+      slow ? Promise.all([api('/api/config'), api('/api/wallet').catch(() => null), api('/api/journal').catch(() => null)]) : null]);
+    if (more) { const [config, wallet, journal] = more; state = { ...state, config, wallet, journal }; slowAt = Date.now(); }
+    state = { ...state, overview, events };
+    const now = JSON.stringify([overview, events, more]);
+    if (!pressing && (more || now !== shown)) { shown = now; render(); }
   } catch (e) { $('#alerts').innerHTML = `<div class="alert bad">Can't reach the server: ${esc(e.message)}</div>`; }
+  finally { refreshing = false; }
 }
 
 function render() {
@@ -549,4 +562,4 @@ $('#unlockForm').addEventListener('submit', async e => {
 });
 
 refresh();
-setInterval(refresh, 10_000);
+setInterval(refresh, 400);
