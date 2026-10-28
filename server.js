@@ -186,6 +186,7 @@ function tokenAddress(value) {
   for (const run of String(value || '').match(/[1-9A-HJ-NP-Za-km-z]{32,44}/g) || []) {
     try { return new PublicKey(run).toBase58(); } catch { /* try the next one */ }
   }
+  if (/0x[0-9a-f]{40}/i.test(String(value))) throw new Error('That is an Ethereum-style (0x…) address from a chain like Ethereum, Base or BNB. The bots only trade Solana coins.');
   throw new Error('Invalid Solana token address. Paste the coin\'s contract address (CA).');
 }
 function getDevWallet() { return requirePublicKey(DEV_WALLET_ADDRESS, 'dev wallet address'); }
