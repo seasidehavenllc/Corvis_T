@@ -51,6 +51,10 @@ const FOLLOW_TTL_MS = 2 * 60_000;
 export const MAX_FOLLOWED = 10;
 // Coins a followed wallet buys are usually minutes old and still small, so the filters that only judge
 // how established a coin is are left out for them. Mint authority, whale, rug and cost checks still apply.
+// Overnight, every coin name launched more than once (4 Robotaxi, 2 Google AI, 2 INVISIBLE, 2 OAK) was a
+// clone, and together they lost more than half of the night's paper losses. A name seen on another mint in
+// the last COPYCAT_MS is skipped.
+const COPYCAT_MS = 2 * 60 * 60 * 1000;
 const FOLLOW_IGNORES = new Set(['age', 'too_new', 'buys', 'momentum', 'holders', 'organic', 'seeded_pool', 'unknown_holders']);
 const HOLDER_LOOKUP_MS = 2 * 60_000; // a coin's holder count looked up from Jupiter is reused this long
 // Finding wallets to copy: a coin that has run this far since the bot first saw it is checked for the
@@ -1051,6 +1055,7 @@ export function createEngine({
   const firstSeen = new Map(); // mint -> { price, at }
   const priceHistory = new Map(); // mint -> [{ at, price }], sampled as watched tokens are re-checked
   const lastLiquidity = new Map(); // mint -> pool USD at the last check, to drop dead tokens from the watchlist first
+  const nameMints = new Map(); // upper-case symbol -> Map(mint -> last seen), to spot clones of one name
   const scouted = new Set();
   const gradeQueue = [];
   const gradedAt = new Map(); // wallet -> last graded
@@ -1185,6 +1190,14 @@ export function createEngine({
       for (const [m, p] of candidates) if (!firstSeen.has(m) && Number(p.priceNative) > 0) firstSeen.set(m, { price: Number(p.priceNative), at: now });
       for (const [m, f] of firstSeen) if (now - f.at > 2 * 3_600_000) firstSeen.delete(m);
       for (const [m, p] of candidates) {
+        const name = String(p.baseToken?.symbol || '').trim().toUpperCase();
+        if (name) { const seen = nameMints.get(name) || new Map(); seen.set(m, now); nameMints.set(name, seen); }
+      }
+      for (const [name, seen] of nameMints) {
+        for (const [m, at] of seen) if (now - at > COPYCAT_MS) seen.delete(m);
+        if (!seen.size) nameMints.delete(name);
+      }
+      for (const [m, p] of candidates) {
         const price = Number(p.priceNative);
         lastLiquidity.set(m, p.liquidity?.usd || 0);
         if (!(price > 0)) continue;
@@ -1217,6 +1230,7 @@ export function createEngine({
           const leader = leaderOf(mint);
           let failed = passesFilters(pair, bot, now).filter(r => !leader || !FOLLOW_IGNORES.has(r));
           if (failed.length === 1 && failed[0] === 'unknown_holders' && await addHolderData(mint, pair, now)) failed = passesFilters(pair, bot, now).filter(r => !leader || !FOLLOW_IGNORES.has(r));
+          if (!failed.length && !leader && (nameMints.get(String(pair.baseToken?.symbol || '').trim().toUpperCase())?.size || 0) > 1) failed.push('copycat');
           if (failed.length) { skips[failed[0]] = (skips[failed[0]] || 0) + 1; continue; }
           // Breakout bots keep watching a coin that passes the filters and buy once it starts climbing.
           if (bot.breakoutPct > 0 && !leader) {
