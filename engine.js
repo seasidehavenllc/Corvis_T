@@ -24,6 +24,11 @@ const NO_ROUTE = 'No Jupiter route for this token: nobody can buy it right now (
 const AUDIT_KEYS = ['holders', 'topHoldersPct', 'devPct', 'devMints', 'isSus', 'organicScore', 'traders5m', 'organicBuyers5m', 'bondingCurvePct', 'liquidityChange5m'];
 const SEEN_TTL_MS = 2 * 60 * 60 * 1000; // tokens are tracked this long after first sight, waiting for a breakout
 const WATCHLIST_MAX = 300;
+// A coin whose pool is still too small for every running bot this long after it was first seen is dropped,
+// so the price refreshes go to coins that could still be bought.
+const DEAD_POOL_MS = 10 * 60_000;
+const DEX_FEED_MS = 30_000; // DexScreener's profile and boost lists; polling them every scan got the server rate-limited
+const SEARCH_REFRESH_MS = 15_000; // watched coins missing from the feeds are re-priced this often (one Jupiter call per 100)
 // Breakout entries: every watched token's price is sampled as it is re-checked, and a bot with breakoutPct
 // set only buys a token once it is climbing: up that much from its low over the last BREAKOUT_WINDOW_MS,
 // still within 5% of its high, and its last three samples each higher than the one before.
@@ -472,15 +477,25 @@ export function createEngine({
   // New launches come from Jupiter's recent-tokens and top organic lists, GeckoTerminal's newest pools and DexScreener's
   // latest profiles and boosts, whichever are answering. Tokens are watched for SEEN_TTL_MS and re-checked
   // every scan, so a launch that is too quiet at first can still be bought once it picks up.
-  let lastOrganicAt = 0;
+  let lastOrganicAt = 0, lastDexFeedAt = -Infinity;
+  const deadPools = new Map(); // mint -> when it was dropped for a pool too small; feeds listing it again don't re-add it
   async function discover(now) {
-    for (const [mint, at] of watch) if (now - at > SEEN_TTL_MS) watch.delete(mint);
-    const add = mint => { if (mint && !watch.has(mint)) watch.set(mint, now); };
+    const picked = new Set(db.bots.flatMap(b => b.watchTokens || []));
+    const running = db.bots.filter(b => b.enabled);
+    const floor = running.length ? Math.min(...running.map(b => b.minLiquidityUsd || 0)) : 0;
+    for (const [mint, at] of watch) {
+      if (picked.has(mint)) continue;
+      if (now - at > SEEN_TTL_MS) watch.delete(mint);
+      else if (now - at > DEAD_POOL_MS && (lastLiquidity.get(mint) ?? Infinity) < floor) { watch.delete(mint); deadPools.set(mint, now); }
+    }
+    for (const [mint, at] of deadPools) if (now - at > SEEN_TTL_MS) deadPools.delete(mint);
+    const add = mint => { if (mint && !watch.has(mint) && !deadPools.has(mint)) watch.set(mint, now); };
     // Coins someone asked a bot to watch stay on the list (moved to the newest end so they are never evicted).
     for (const b of db.bots) for (const m of b.watchTokens || []) { watch.delete(m); watch.set(m, now); }
     const pairs = new Map();
     const keep = pair => {
       if (!pair) return;
+      if ((pair.liquidity?.usd || 0) >= floor) deadPools.delete(pair.baseToken.address); // grew: watch it again
       add(pair.baseToken.address);
       const cur = pairs.get(pair.baseToken.address);
       if (!cur) return pairs.set(pair.baseToken.address, pair);
@@ -515,7 +530,9 @@ export function createEngine({
     }
     try { for (const pool of (await feedJson(`${GECKOTERMINAL}/networks/solana/new_pools?page=1`, 90_000))?.data || []) keep(geckoPair(pool)); sources.geckoterminal = 'ok'; }
     catch (e) { sources.geckoterminal = e.message; }
-    if (available(DEX_HOST)) {
+    if (now - lastDexFeedAt < DEX_FEED_MS) sources.dexscreener = 'ok';
+    else if (available(DEX_HOST)) {
+      lastDexFeedAt = now;
       const feeds = await Promise.allSettled([feedJson(`${DEXSCREENER}/token-profiles/latest/v1`, 120_000), feedJson(`${DEXSCREENER}/token-boosts/latest/v1`, 120_000)]);
       for (const feed of feeds) if (feed.status === 'fulfilled' && Array.isArray(feed.value)) for (const item of feed.value) if (item?.chainId === 'solana') add(item.tokenAddress);
       sources.dexscreener = feeds.some(f => f.status === 'fulfilled') ? 'ok' : feeds[0].reason?.message;
@@ -531,7 +548,7 @@ export function createEngine({
     health.watching = watch.size;
     // Refresh watched tokens that weren't in this scan's feeds: Jupiter token search first, then DexScreener.
     let stale = [...watch.keys()].filter(m => !pairs.has(m));
-    if (stale.length && solUsd && now - lastSearchAt >= 30_000) {
+    if (stale.length && solUsd && now - lastSearchAt >= SEARCH_REFRESH_MS) {
       lastSearchAt = now;
       for (let i = 0; i < stale.length; i += 100) {
         try { for (const t of await feedJson(`${JUPITER_TOKENS}/search?query=${stale.slice(i, i + 100).join(',')}`, 30_000) || []) { const p = jupiterPair(t); if (p) pairs.set(p.baseToken.address, p); } }
