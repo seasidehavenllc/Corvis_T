@@ -367,6 +367,17 @@ test('a breakout bot keeps watching a coin and buys once it starts climbing', as
   assert.ok(db.positions[0].features.breakoutRisePct >= 15);
 });
 
+test('a coin name launched on more than one mint is skipped as a copycat', async () => {
+  const other = Keypair.generate().publicKey.toBase58();
+  const quote = url => { const u = new URL(url); const amt = Number(u.searchParams.get('amount')); return { outAmount: String(Math.floor(u.searchParams.get('inputMint') === SOL_MINT ? amt / 1e9 / 0.001 * 1e6 : amt / 1e6 * 0.001 * 1e9)) }; };
+  const fetchImpl = async url => ({ ok: true, json: async () => url.includes('/quote') ? quote(url) : url.includes('token-profiles') ? [{ chainId: 'solana', tokenAddress: MINT }, { chainId: 'solana', tokenAddress: other }] : url.includes('token-boosts') ? [] : url.includes('dexscreener') ? [pair({ pairCreatedAt: Date.now() - 60_000 }), pair({ pairCreatedAt: Date.now() - 60_000, baseToken: { address: other, symbol: 'test ' } })] : [] });
+  const connection = { getParsedAccountInfo: async () => ({ value: { data: { parsed: { info: { mintAuthority: null, freezeAuthority: null, decimals: 6 } } } } }) };
+  const db = { bots: [{ ...bot, maxSingleHolderPct: 0, insiderSellPct: 0, paperBalanceSol: 1, stats: { ...bot.stats } }], trades: [], positions: [] };
+  const engine = createEngine({ db, save: async () => {}, log: () => {}, connection, getKeypair: () => null, liveAllowed: false, fetchImpl });
+  await engine.scan();
+  assert.equal(db.positions.length, 0);
+});
+
 // Rug guard: a fake chain where the coin's biggest wallets can be read and made to sell.
 import { Keypair, PublicKey } from '@solana/web3.js';
 import { insiderWallets, rugSignal, breakoutRise } from '../engine.js';
